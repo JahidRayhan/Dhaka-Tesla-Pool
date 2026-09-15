@@ -154,13 +154,19 @@ passengerFare = baseFare + distanceCharge - poolDiscount
   haversine straight-line distance between the request's pickup and
   destination zone centroids (`zones.latitude/longitude`). Assumption:
   **ratePerKm = 1500 paisa/km (৳15/km)**.
-- **`poolDiscount`**: **20% of `distanceCharge`**, applied only if the pool
-  has more than one passenger *at the moment this request's fare is locked*.
-  Locked at `MATCHED` time and not recalculated later — a passenger who joins
-  a solo trip doesn't retroactively raise or lower an already-matched
-  passenger's fare. (Documented trade-off: this is simpler and more
-  predictable for riders than dynamic re-splitting, at the cost of the pool
-  discount not reflecting the pool's *final* size if it grows further.)
+- **`poolDiscount`**: **20% of `distanceCharge`**, applied only if the pool's
+  *final* membership has more than one passenger. "Final" is knowable for
+  certain the moment the pool transitions `DRIVER_ARRIVED → STARTED`, because
+  no new passenger can join after `DRIVER_ARRIVED` (see lifecycle rules
+  below) — so at `STARTED` the backend computes each pool member's discount
+  once, uniformly, from the pool's locked-in size. Before that point a
+  passenger only sees an **estimate** (`baseFare + distanceCharge`, no
+  discount assumed) so they have a number to look at while waiting to be
+  matched, without the app promising a discount it can't yet guarantee.
+  (Earlier draft of this doc locked the discount at `MATCHED` time instead —
+  wrong, because it would have given an early-matched passenger like Nusrat
+  no discount while a later-joining Rafiq got one, for the same pool. Fixed
+  here before it reached the implementation.)
 
 ### Worked example (hand-checkable)
 
