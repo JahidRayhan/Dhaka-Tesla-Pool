@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tesla
+      POSTGRES_PASSWORD: tesla
+      POSTGRES_DB: dhaka_tesla_pool
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # Postgres's official image runs every .sql file in this directory,
+      # in filename order, ONLY on first init (empty data dir). That's why
+      # migrations/seed are plain numbered SQL rather than a migration tool
+      # for this MVP — see README "Tech Choices" for the trade-off.
+      - ./migrations:/docker-entrypoint-initdb.d/migrations
+      - ./seed:/docker-entrypoint-initdb.d/seed
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tesla -d dhaka_tesla_pool"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 4000
+      DATABASE_URL: postgresql://tesla:tesla@db:5432/dhaka_tesla_pool
+      JWT_SECRET: change_me_dev_only
+      JWT_EXPIRES_IN: 7d
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  db_data:
