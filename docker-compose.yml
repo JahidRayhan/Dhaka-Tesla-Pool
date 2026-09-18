@@ -10,12 +10,15 @@ services:
       - "5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
-      # Postgres's official image runs every .sql file in this directory,
-      # in filename order, ONLY on first init (empty data dir). That's why
-      # migrations/seed are plain numbered SQL rather than a migration tool
-      # for this MVP — see README "Tech Choices" for the trade-off.
-      - ./migrations:/docker-entrypoint-initdb.d/migrations
-      - ./seed:/docker-entrypoint-initdb.d/seed
+      # Postgres's official image runs every .sql file directly inside this
+      # directory, in filename order, ONLY on first init (empty data dir) —
+      # it does NOT recurse into subfolders, so each file is bind-mounted
+      # individually to keep migrations/ and seed/ as separate folders in
+      # the repo while still flattening correctly for Docker. That's also
+      # why this is plain numbered SQL rather than a migration tool for the
+      # MVP — see README "Tech Choices" for the trade-off.
+      - ./migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ./seed/002_seed.sql:/docker-entrypoint-initdb.d/002_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tesla -d dhaka_tesla_pool"]
       interval: 5s
