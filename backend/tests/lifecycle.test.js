@@ -196,3 +196,18 @@ test('a driver cannot accept requests using a Tesla that is not theirs', async (
   const res = await acceptRide(req.body.rideRequest.id, { teslaId: fakeTeslaId });
   assert.equal(res.status, 404);
 });
+
+test('a Tesla can only run one active pool at a time', async () => {
+  const first = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
+  const accept1 = await acceptRide(first.body.rideRequest.id, { teslaId });
+  assert.equal(accept1.status, 200);
+
+  // Rafiq's request is route-compatible, but this driver tries to start a
+  // SECOND new pool on the same Tesla instead of joining the first one.
+  const second = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
+  const accept2 = await acceptRide(second.body.rideRequest.id, { teslaId }); // no poolId — attempts a new pool
+  assert.equal(accept2.status, 409);
+
+  const { rows } = await pool.query("SELECT count(*) FROM pools WHERE tesla_id = $1 AND status NOT IN ('COMPLETED','CANCELLED')", [teslaId]);
+  assert.equal(rows[0].count, '1');
+});
