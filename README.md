@@ -328,7 +328,11 @@ verified during development — see [AI usage](#ai-usage).
 
 ## Running tests
 
+Two independent suites — different folders, different test databases, can
+run in either order without interfering:
+
 ```bash
+# 1. backend/tests/ — organized by code module, covers Section 12's list directly
 cd backend
 cp .env.test.example .env.test
 TEST_DB_NAME=dhaka_tesla_pool_test ../scripts/setup-test-db.sh
@@ -342,6 +346,26 @@ Section 12 asks for: capacity never exceeded (including under concurrent
 requests for the last seat), invalid transitions rejected, pooled fares
 calculated correctly, cross-user access blocked, cancellation rules, and one
 Tesla never running two pools at once.
+
+```bash
+# 2. acceptance-tests/ — organized by PRD requirement, one file per feature
+#    area, with a coverage matrix mapping every line to its test
+cd acceptance-tests
+cp .env.test.example .env.test
+npm install
+TEST_DB_NAME=dhaka_tesla_pool_acceptance ../scripts/setup-test-db.sh
+ENV_FILE=.env.test npm test
+```
+
+Expected: `23 pass, 0 fail`. This suite exists because checking the first
+suite against the PRD's Section 3 table line by line found real gaps —
+signup, login failures, `/auth/me`, unauthenticated/wrong-role access, ride
+history, Tesla registration and the online/offline toggle, the driver's
+open-requests listing, pool detail/listing, and — most notably — completing
+a trip (`PATCH /pools/:id/complete`) were never exercised by any test before
+this suite, which also meant the Section 5 payment-record requirement was
+completely unverified. Full requirement-to-test mapping in
+[`acceptance-tests/README.md`](acceptance-tests/README.md).
 
 For a manual, narrated walkthrough of the same story instead of the
 automated suite, run `./smoketest.sh` from the project root (needs the dev
