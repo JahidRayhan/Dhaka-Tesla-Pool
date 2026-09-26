@@ -168,30 +168,36 @@ passengerFare = baseFare + distanceCharge - poolDiscount
   no discount while a later-joining Rafiq got one, for the same pool. Fixed
   here before it reached the implementation.)
 
-### Worked example (hand-checkable)
+### Worked example (hand-checkable — verified against the running API, not hand-rounded)
 
-Zone centroids (from seed data) and haversine distance from Banani:
+Zone centroids are in `seed/002_seed.sql`. Haversine distance from Banani
+(23.7936, 90.4066):
 
 | Route | Distance |
 |---|---|
-| Banani → Mohakhali (Nusrat) | 1.5 km |
-| Banani → Gulshan 1 (Rafiq) | 1.7 km |
+| Banani → Mohakhali (Nusrat) | 1.448 km |
+| Banani → Gulshan 1 (Rafiq) | 1.711 km |
 
 Both requests match (same pickup zone `Banani`, destinations in the same
-`gulshan_cluster`) and land in the same pool on Bullet, so both get the pool
-discount:
+`gulshan_cluster`) and land in the same pool on Bullet. Jashim marks
+`DRIVER_ARRIVED` then `STARTED` with both still in the pool, so the discount
+finalizes for both of them at that point:
 
 **Nusrat**
 - `baseFare` = 3000
-- `distanceCharge` = 1500 × 1.5 = 2250
-- `poolDiscount` = 20% × 2250 = 450
-- `passengerFare` = 3000 + 2250 − 450 = **4800 paisa = ৳48.00**
+- `distanceCharge` = round(1500 × 1.448) = 2172
+- `poolDiscount` = round(20% × 2172) = 434
+- `passengerFare` = 3000 + 2172 − 434 = **4738 paisa = ৳47.38**
 
 **Rafiq**
 - `baseFare` = 3000
-- `distanceCharge` = 1500 × 1.7 = 2550
-- `poolDiscount` = 20% × 2550 = 510
-- `passengerFare` = 3000 + 2550 − 510 = **5040 paisa = ৳50.40**
+- `distanceCharge` = round(1500 × 1.711) = 2567
+- `poolDiscount` = round(20% × 2567) = 513
+- `passengerFare` = 3000 + 2567 − 513 = **5054 paisa = ৳50.54**
+
+These exact numbers were reproduced by an end-to-end run against the actual
+API and Postgres (seed data → login → request → accept → arrive → start),
+not computed by hand separately from the code — see `smoketest.sh`.
 
 **Shirin**, arriving 30s later requesting a route *outside* the
 `gulshan_cluster` (e.g. to Mirpur), fails the matching rule and does **not**
