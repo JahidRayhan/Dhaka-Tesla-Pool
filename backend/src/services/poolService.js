@@ -89,6 +89,22 @@ async function acceptRequest(driverId, requestId, { teslaId, poolId }) {
       }
     } else {
       // --- Start a brand-new pool ---
+      // A Tesla is one physical vehicle — it can only be running one
+      // non-terminal pool at a time. Without this check, a driver could
+      // accept two different requests into two separate new pools on the
+      // same Tesla, each individually passing its own capacity check while
+      // the vehicle is logically in two places at once.
+      const { rows: activePools } = await client.query(
+        `SELECT id FROM pools WHERE tesla_id = $1 AND status NOT IN ('COMPLETED', 'CANCELLED') FOR UPDATE`,
+        [teslaId],
+      );
+      if (activePools.length > 0) {
+        throw new ApiError(
+          409,
+          `${tesla.name} already has an active pool — add this passenger to it instead of starting a new one`,
+        );
+      }
+
       if (rideRequest.seats_requested > tesla.capacity) {
         throw new ApiError(422, `${tesla.name} only has ${tesla.capacity} seats`);
       }

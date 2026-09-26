@@ -93,8 +93,10 @@ async function getByIdForUser(id, user) {
 /** Open requests a driver can consider accepting. MVP: no geospatial filter. */
 async function listOpen() {
   const { rows } = await pool.query(
-    `SELECT rr.*, pz.name AS pickup_zone_name, dz.name AS destination_zone_name, dz.cluster AS destination_cluster
+    `SELECT rr.*, u.name AS passenger_name,
+            pz.name AS pickup_zone_name, dz.name AS destination_zone_name, dz.cluster AS destination_cluster
      FROM ride_requests rr
+     JOIN users u ON u.id = rr.passenger_id
      JOIN zones pz ON pz.id = rr.pickup_zone_id
      JOIN zones dz ON dz.id = rr.destination_zone_id
      WHERE rr.status = 'REQUESTED'
