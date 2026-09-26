@@ -1,0 +1,13 @@
+{
+  "name": "dhaka-tesla-pool-acceptance-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PRD feature-coverage suite — separate from backend/tests, organized by requirement rather than by code module.",
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0",
+    "dotenv": "^16.4.5"
+  }
+}
