@@ -7,11 +7,14 @@ const RATE_PER_KM_PAISA = 1500; // ৳15/km
 const POOL_DISCOUNT_RATE = 0.2; // 20% off distanceCharge when pool size > 1
 
 /**
- * baseFare + distanceCharge for a single zone-to-zone trip.
- * Called at request time to show the passenger an estimate, and again
- * whenever we need the raw (pre-discount) numbers.
+ * baseFare + distanceCharge for a single zone-to-zone trip, scaled by seat
+ * count. A 2-seat booking occupies twice the capacity of a 1-seat booking on
+ * the same route, so it should cost twice as much — this was a real bug
+ * caught by hand-testing: seatsRequested was accepted by the API but never
+ * actually reached the fare calculation, so a 1-seat and 2-seat booking on
+ * an identical route billed identically.
  */
-function computeBaseAndDistance(pickupZone, destinationZone) {
+function computeBaseAndDistance(pickupZone, destinationZone, seatsRequested = 1) {
   const distanceKm = haversineKm(
     pickupZone.latitude,
     pickupZone.longitude,
@@ -19,11 +22,21 @@ function computeBaseAndDistance(pickupZone, destinationZone) {
     destinationZone.longitude,
   );
 
-  const distanceChargePaisa = Math.round(RATE_PER_KM_PAISA * distanceKm);
+  const baseFarePaisa = BASE_FARE_PAISA * seatsRequested;
+  // Round the PER-SEAT distance charge first, then multiply by seat count —
+  // not the other way around. Rounding the combined amount (rate * distance
+  // * seats) independently at each seat count lets 2 seats drift a paisa
+  // away from exactly double 1 seat, because two separate roundings don't
+  // commute with multiplication. Rounding once per seat and then scaling by
+  // an integer guarantees seatsRequested=2 is always exactly 2x
+  // seatsRequested=1 on the same route — caught by the "costs exactly
+  // double" test itself failing on the first version of this fix.
+  const perSeatDistanceChargePaisa = Math.round(RATE_PER_KM_PAISA * distanceKm);
+  const distanceChargePaisa = perSeatDistanceChargePaisa * seatsRequested;
 
   return {
     distanceKm,
-    baseFarePaisa: BASE_FARE_PAISA,
+    baseFarePaisa,
     distanceChargePaisa,
   };
 }
