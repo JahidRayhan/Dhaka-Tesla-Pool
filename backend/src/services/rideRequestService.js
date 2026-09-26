@@ -24,7 +24,7 @@ async function createRequest(passengerId, { pickupZoneId, destinationZoneId, sea
     const pickupZone = await getZoneOrThrow(client, pickupZoneId, 'Pickup');
     const destinationZone = await getZoneOrThrow(client, destinationZoneId, 'Destination');
 
-    const { baseFarePaisa, distanceChargePaisa } = computeBaseAndDistance(pickupZone, destinationZone);
+    const { baseFarePaisa, distanceChargePaisa } = computeBaseAndDistance(pickupZone, destinationZone, seatsRequested);
 
     const { rows } = await client.query(
       `INSERT INTO ride_requests

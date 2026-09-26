@@ -49,6 +49,12 @@ test('passenger sees an estimated fare immediately, before any match (no discoun
   assert.equal(res.body.rideRequest.final_fare_paisa, '5172'); // 3000 + 2172, discount = 0
 });
 
+test('a 2-seat request costs exactly double a 1-seat request on the same route', async () => {
+  const oneSeat = await requestRide(tokens.nusrat, { destination: 'Mohakhali', seats: 1 });
+  const twoSeats = await requestRide(tokens.rafiq, { destination: 'Mohakhali', seats: 2 });
+  assert.equal(Number(twoSeats.body.rideRequest.final_fare_paisa), Number(oneSeat.body.rideRequest.final_fare_paisa) * 2);
+});
+
 test('pooled fares finalize with the 20% discount only once the trip STARTS, not at MATCHED', async () => {
   const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
   const rafiqReq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });

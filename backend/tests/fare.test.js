@@ -27,6 +27,13 @@ test('a solo passenger (pool size 1) gets no pool discount', () => {
   assert.equal(computePoolDiscount(2172, 1), 0);
 });
 
+test('base fare and distance charge scale with seatsRequested (2 seats costs exactly double)', () => {
+  const oneSeat = computeBaseAndDistance(BANANI, MOHAKHALI, 1);
+  const twoSeats = computeBaseAndDistance(BANANI, MOHAKHALI, 2);
+  assert.equal(twoSeats.baseFarePaisa, oneSeat.baseFarePaisa * 2);
+  assert.equal(twoSeats.distanceChargePaisa, oneSeat.distanceChargePaisa * 2);
+});
+
 test('a pooled passenger gets exactly 20% off their own distance charge, rounded to the nearest paisa', () => {
   assert.equal(computePoolDiscount(2172, 2), 434); // Nusrat
   assert.equal(computePoolDiscount(2567, 2), 513); // Rafiq
