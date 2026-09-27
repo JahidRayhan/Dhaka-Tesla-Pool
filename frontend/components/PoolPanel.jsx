@@ -9,6 +9,7 @@ const NEXT_ACTION = {
 
 export default function PoolPanel({ pool, onAdvance, advancing }) {
   const next = NEXT_ACTION[pool.status];
+  const hasUnconfirmed = pool.members.some((m) => m.status === 'PENDING_CONFIRMATION');
 
   return (
     <div className="border border-line p-5">
@@ -25,14 +26,24 @@ export default function PoolPanel({ pool, onAdvance, advancing }) {
       <ul className="mb-4">
         {pool.members.map((m) => (
           <li key={m.id} className="flex items-center justify-between border-b border-line py-2 text-sm last:border-0">
-            <span>{m.passenger_name}</span>
+            <span className="flex items-center gap-2">
+              {m.passenger_name}
+              {m.status === 'PENDING_CONFIRMATION' && <StatusBadge status={m.status} />}
+            </span>
             <span className="text-ink/60">{formatTaka(m.final_fare_paisa)}</span>
           </li>
         ))}
       </ul>
 
+      {next && pool.status === 'MATCHED' && hasUnconfirmed && (
+        <p className="mb-2 text-sm text-amber">Waiting on a passenger to confirm sharing before you can arrive.</p>
+      )}
       {next && (
-        <button onClick={() => onAdvance(pool.id, next.action)} disabled={advancing} className="btn-primary w-full">
+        <button
+          onClick={() => onAdvance(pool.id, next.action)}
+          disabled={advancing || (pool.status === 'MATCHED' && hasUnconfirmed)}
+          className="btn-primary w-full"
+        >
           {advancing ? 'Updating…' : next.label}
         </button>
       )}

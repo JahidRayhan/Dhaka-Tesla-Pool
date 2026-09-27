@@ -7,7 +7,7 @@ import RideRequestCard from '../../components/RideRequestCard';
 import { useAuth } from '../../lib/AuthContext';
 import { api, ApiRequestError } from '../../lib/api';
 
-const ACTIVE_STATUSES = new Set(['REQUESTED', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED']);
+const ACTIVE_STATUSES = new Set(['REQUESTED', 'PENDING_CONFIRMATION', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED']);
 
 export default function PassengerPage() {
   const { user, token, loading: authLoading } = useAuth();
@@ -24,6 +24,8 @@ export default function PassengerPage() {
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
+  const [confirmingId, setConfirmingId] = useState(null);
+  const [decliningId, setDecliningId] = useState(null);
 
   useEffect(() => {
     if (!authLoading && !user) router.replace('/login');
@@ -94,6 +96,30 @@ export default function PassengerPage() {
       setLoadError(err instanceof ApiRequestError ? err.message : 'Could not cancel that ride.');
     } finally {
       setCancellingId(null);
+    }
+  }
+
+  async function handleConfirm(id) {
+    setConfirmingId(id);
+    try {
+      await api.confirmRideRequest(token, id);
+      await loadRides();
+    } catch (err) {
+      setLoadError(err instanceof ApiRequestError ? err.message : 'Could not confirm sharing that ride.');
+    } finally {
+      setConfirmingId(null);
+    }
+  }
+
+  async function handleDecline(id) {
+    setDecliningId(id);
+    try {
+      await api.declineRideRequest(token, id);
+      await loadRides();
+    } catch (err) {
+      setLoadError(err instanceof ApiRequestError ? err.message : 'Could not decline that ride.');
+    } finally {
+      setDecliningId(null);
     }
   }
 
@@ -191,7 +217,16 @@ export default function PassengerPage() {
           ) : (
             <ul>
               {rides.map((r) => (
-                <RideRequestCard key={r.id} rideRequest={r} onCancel={handleCancel} cancelling={cancellingId === r.id} />
+                <RideRequestCard
+                  key={r.id}
+                  rideRequest={r}
+                  onCancel={handleCancel}
+                  cancelling={cancellingId === r.id}
+                  onConfirm={handleConfirm}
+                  confirming={confirmingId === r.id}
+                  onDecline={handleDecline}
+                  declining={decliningId === r.id}
+                />
               ))}
             </ul>
           )}

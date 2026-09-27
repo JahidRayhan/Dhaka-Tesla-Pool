@@ -49,6 +49,9 @@ export const api = {
   openRideRequests: (token) => apiFetch('/api/ride-requests/open', { token }),
   cancelRideRequest: (token, id, reason) =>
     apiFetch(`/api/ride-requests/${id}/cancel`, { method: 'PATCH', body: { reason }, token }),
+  confirmRideRequest: (token, id) => apiFetch(`/api/ride-requests/${id}/confirm`, { method: 'POST', token }),
+  declineRideRequest: (token, id, reason) =>
+    apiFetch(`/api/ride-requests/${id}/decline`, { method: 'POST', body: { reason }, token }),
   acceptRideRequest: (token, id, payload) =>
     apiFetch(`/api/ride-requests/${id}/accept`, { method: 'POST', body: payload, token }),
 
