@@ -1,0 +1,20 @@
+-- Adds PENDING_CONFIRMATION to ride_request_status.
+--
+-- Used only when a driver adds a passenger to a POOL THAT ALREADY HAS
+-- ANOTHER ACTIVE MEMBER. The seat is still reserved atomically the moment
+-- the driver accepts (same capacity-check pattern as always — see
+-- poolService.acceptRequest), but the ride_request stays
+-- PENDING_CONFIRMATION rather than jumping straight to MATCHED, until the
+-- passenger being added explicitly confirms they're willing to share with
+-- whoever else is already in that pool.
+--
+-- A brand-new pool's FIRST member skips this state entirely and goes
+-- straight to REQUESTED -> MATCHED, on the reasoning that requesting a ride
+-- at all is itself consent to share if the app later finds someone
+-- compatible — only joining an *existing* pool with a stranger already in
+-- it needs an explicit yes.
+--
+-- Postgres requires ALTER TYPE ... ADD VALUE to run as its own statement,
+-- not batched with other DDL/DML that might use the new value in the same
+-- transaction — this file contains nothing else, deliberately.
+ALTER TYPE ride_request_status ADD VALUE IF NOT EXISTS 'PENDING_CONFIRMATION' AFTER 'REQUESTED';

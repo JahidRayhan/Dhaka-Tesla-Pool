@@ -18,6 +18,14 @@ async function assertOwnsActiveTesla(client, driverId, teslaId) {
  * capacity is enforced with a single atomic UPDATE ... WHERE — see
  * DESIGN.md "Concurrency" for why this is the fix for the
  * Nusrat-vs-Shirin last-seat race, not a read-then-write in app code.
+ *
+ * A brand-new pool's first member goes straight to MATCHED — requesting a
+ * ride at all is itself consent to share if the app later finds someone
+ * compatible. Joining an EXISTING pool (a stranger is already in it) instead
+ * lands the ride_request in PENDING_CONFIRMATION: the seat is reserved
+ * immediately, but the passenger being added must explicitly confirm before
+ * it becomes MATCHED — see confirmJoin/declineJoin below, and DESIGN.md's
+ * "Passenger consent to pooling" section.
  */
 async function acceptRequest(driverId, requestId, { teslaId, poolId }) {
   const client = await db.connect();
@@ -37,6 +45,7 @@ async function acceptRequest(driverId, requestId, { teslaId, poolId }) {
     }
 
     let resolvedPoolId = poolId;
+    const joiningExistingPool = Boolean(poolId);
 
     if (poolId) {
       // --- Join an existing pool ---
@@ -124,20 +133,116 @@ async function acceptRequest(driverId, requestId, { teslaId, poolId }) {
       });
     }
 
-    await client.query(
-      `UPDATE ride_requests SET status = 'MATCHED', matched_at = now(), pool_id = $2 WHERE id = $1`,
-      [requestId, resolvedPoolId],
-    );
+    // A brand-new pool's first member is auto-consented (see doc comment
+    // above); joining an existing pool needs the passenger's own yes.
+    // Two explicit branches, not one UPDATE with $2 doing double duty as
+    // both the enum assignment and a text comparison in a CASE — Postgres's
+    // parameter-type inference gets confused when the same placeholder is
+    // used in two different type contexts in one statement (hit this as a
+    // real 500 while building this feature, not a hypothetical).
+    const initialStatus = joiningExistingPool ? 'PENDING_CONFIRMATION' : 'MATCHED';
+
+    if (initialStatus === 'MATCHED') {
+      await client.query(
+        `UPDATE ride_requests SET status = 'MATCHED', pool_id = $2, matched_at = now() WHERE id = $1`,
+        [requestId, resolvedPoolId],
+      );
+    } else {
+      await client.query(
+        `UPDATE ride_requests SET status = 'PENDING_CONFIRMATION', pool_id = $2 WHERE id = $1`,
+        [requestId, resolvedPoolId],
+      );
+    }
     await logTransition(client, {
       entityType: 'ride_request',
       entityId: requestId,
       fromStatus: 'REQUESTED',
-      toStatus: 'MATCHED',
+      toStatus: initialStatus,
       changedBy: driverId,
     });
 
     await client.query('COMMIT');
-    return { poolId: resolvedPoolId };
+    return { poolId: resolvedPoolId, rideRequestStatus: initialStatus };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Passenger accepts a driver's invitation to share their ride with whoever
+ * else is in the pool. Only valid from PENDING_CONFIRMATION — this is the
+ * other half of the consent gate in acceptRequest above.
+ */
+async function confirmJoin(passengerId, requestId) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(`SELECT * FROM ride_requests WHERE id = $1 FOR UPDATE`, [requestId]);
+    if (rows.length === 0) throw new ApiError(404, 'Ride request not found');
+    const rideRequest = rows[0];
+    if (rideRequest.passenger_id !== passengerId) throw new ApiError(403, "That ride isn't yours");
+    if (rideRequest.status !== 'PENDING_CONFIRMATION') {
+      throw new ApiError(409, `Ride request is '${rideRequest.status}', not awaiting confirmation`);
+    }
+
+    await client.query(`UPDATE ride_requests SET status = 'MATCHED', matched_at = now() WHERE id = $1`, [requestId]);
+    await logTransition(client, {
+      entityType: 'ride_request',
+      entityId: requestId,
+      fromStatus: 'PENDING_CONFIRMATION',
+      toStatus: 'MATCHED',
+      changedBy: passengerId,
+    });
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Passenger declines a driver's invitation to share. Frees the reserved
+ * seat atomically (same "never decrement without a guard" reasoning as
+ * rideRequestService.cancel) and returns the ride_request to REQUESTED —
+ * back in the open pool for the driver to offer elsewhere, not cancelled
+ * outright, since the passenger still wants a ride, just not this pool.
+ */
+async function declineJoin(passengerId, requestId, reason) {
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(`SELECT * FROM ride_requests WHERE id = $1 FOR UPDATE`, [requestId]);
+    if (rows.length === 0) throw new ApiError(404, 'Ride request not found');
+    const rideRequest = rows[0];
+    if (rideRequest.passenger_id !== passengerId) throw new ApiError(403, "That ride isn't yours");
+    if (rideRequest.status !== 'PENDING_CONFIRMATION') {
+      throw new ApiError(409, `Ride request is '${rideRequest.status}', not awaiting confirmation`);
+    }
+
+    await client.query(`UPDATE pools SET seats_occupied = seats_occupied - $1 WHERE id = $2`, [
+      rideRequest.seats_requested,
+      rideRequest.pool_id,
+    ]);
+
+    await client.query(`UPDATE ride_requests SET status = 'REQUESTED', pool_id = NULL WHERE id = $1`, [requestId]);
+    await logTransition(client, {
+      entityType: 'ride_request',
+      entityId: requestId,
+      fromStatus: 'PENDING_CONFIRMATION',
+      toStatus: 'REQUESTED',
+      changedBy: passengerId,
+      note: reason,
+    });
+
+    await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -195,6 +300,18 @@ async function transitionPool(driverId, poolId, { fromStatus, toStatus, rrFromSt
     if (targetPool.driver_id !== driverId) throw new ApiError(403, "That pool isn't yours");
     if (targetPool.status !== fromStatus) {
       throw new ApiError(409, `Pool must be '${fromStatus}' to do this (currently '${targetPool.status}')`);
+    }
+
+    // Arriving implies everyone actually coming has agreed to come — can't
+    // mark arrival while someone the driver added is still deciding.
+    if (toStatus === 'DRIVER_ARRIVED') {
+      const { rows: pending } = await client.query(
+        `SELECT id FROM ride_requests WHERE pool_id = $1 AND status = 'PENDING_CONFIRMATION'`,
+        [poolId],
+      );
+      if (pending.length > 0) {
+        throw new ApiError(409, 'Some passengers in this pool have not yet confirmed sharing the ride');
+      }
     }
 
     await client.query(
@@ -287,6 +404,8 @@ const completeTrip = (driverId, poolId) =>
 
 module.exports = {
   acceptRequest,
+  confirmJoin,
+  declineJoin,
   listMineForDriver,
   getPoolDetail,
   markArrived,
