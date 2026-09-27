@@ -48,26 +48,38 @@ the system holds onto enough history to explain exactly what happened.
 
 **Passenger**
 - Sign up / sign in
-- Request a ride (pickup, destination, seats) and see an estimated fare immediately
-- Track status: `REQUESTED → MATCHED → DRIVER_ARRIVED → STARTED → COMPLETED`, or `CANCELLED`
+- Request a ride (pickup, destination, seats) and see an estimated fare
+  immediately, including a note that pooling can take up to 20% off
+- Track status: `REQUESTED → [PENDING_CONFIRMATION] → MATCHED → DRIVER_ARRIVED → STARTED → COMPLETED`, or `CANCELLED`
+- **Consent before sharing**: if a driver wants to add you to a pool that
+  already has someone else in it, your ride sits in `PENDING_CONFIRMATION` —
+  see who you'd be sharing with, then confirm or decline (declining keeps
+  your request open for a different pool). Only applies when *joining an
+  existing pool*; starting a fresh one is instant, since requesting a ride at
+  all is itself consent to share if the app later finds someone compatible
+- See who you're currently sharing a ride with, once matched
 - View ride history
-- Cancel while the cancellation is still valid (before the driver arrives)
+- Cancel while the cancellation is still valid (before the driver arrives —
+  including while still deciding on a pool invitation)
 
 **Driver / Tesla**
 - Sign in, register a Tesla (name + fixed seat capacity), go online/offline
 - See open (unmatched) requests
 - Accept a request into a new pool, or add a compatible request to the Tesla's
-  existing active pool
+  existing active pool (the added passenger must confirm before you can arrive)
 - Mark driver-arrived → start trip → complete trip
-- See current pool's passengers, seats, and each passenger's fare
+- See current pool's passengers, seats, confirmation status, and each
+  passenger's fare
 
 **Pool / Ride split**
 - Multiple requests can share one Tesla, matched by a documented zone rule
 - Occupied seats can never exceed the Tesla's capacity — enforced atomically
-  even under concurrent requests for the same last seat
+  even under concurrent requests for the same last seat, and reserved the
+  moment a driver accepts, before the added passenger has even responded
 - A Tesla can only run one active pool at a time
-- Each passenger gets an individually computed fare; the pool discount
-  finalizes once the trip starts (see [Fare model](#fare-model))
+- Each passenger gets an individually computed fare, correctly scaled by
+  seats requested; the pool discount finalizes once the trip starts (see
+  [Fare model](#fare-model))
 - Every status change is written to an append-only audit log
 
 ## Screenshots
@@ -150,7 +162,10 @@ erDiagram
     }
 ```
 
-Full column-level detail, constraints, and indexes: [`migrations/001_init.sql`](migrations/001_init.sql).
+Full column-level detail, constraints, and indexes: [`migrations/001_init.sql`](migrations/001_init.sql)
+(plus [`migrations/002_add_pending_confirmation_status.sql`](migrations/002_add_pending_confirmation_status.sql),
+which adds the `PENDING_CONFIRMATION` status used for passenger consent — see
+[Passenger consent to pooling](DESIGN.md#5-passenger-consent-to-pooling)).
 Design rationale for every table: [`DESIGN.md`](DESIGN.md).
 
 ## Ride lifecycle
@@ -221,7 +236,8 @@ Full derivation: [`DESIGN.md`](DESIGN.md#3-fare-model).
 ├── docker-compose.yml       # wires db + api + web together
 ├── DESIGN.md                 # schema rationale, lifecycle rules, fare derivation
 ├── migrations/
-│   └── 001_init.sql          # full schema: tables, constraints, indexes, trigger
+│   ├── 001_init.sql          # full schema: tables, constraints, indexes, trigger
+│   └── 002_add_pending_confirmation_status.sql  # passenger consent to pooling
 ├── seed/
 │   └── 002_seed.sql          # zones + Jashim/Bullet/Nusrat/Rafiq/Shirin
 ├── scripts/
@@ -287,7 +303,8 @@ docker compose up --build
 
 This brings up:
 - `db` — Postgres 16, schema + seed data applied automatically on first run
-  (via `migrations/001_init.sql` and `seed/002_seed.sql`, mounted into
+  (via `migrations/001_init.sql`, `migrations/002_add_pending_confirmation_status.sql`,
+  and `seed/002_seed.sql`, mounted into
   Postgres's `docker-entrypoint-initdb.d`)
 - `api` — Express on `:4000`, waits for `db`'s health check before starting
 - `web` — Next.js on `:3000`
@@ -308,6 +325,7 @@ Then open `http://localhost:3000`.
 # 1. Database
 createdb dhaka_tesla_pool
 psql -d dhaka_tesla_pool -f migrations/001_init.sql
+psql -d dhaka_tesla_pool -f migrations/002_add_pending_confirmation_status.sql
 psql -d dhaka_tesla_pool -f seed/002_seed.sql
 
 # 2. Backend
@@ -401,6 +419,8 @@ All endpoints under `/api`, JSON in/out, JWT via `Authorization: Bearer <token>`
 | `GET /ride-requests/:id` | owner or assigned driver | one ride's detail |
 | `PATCH /ride-requests/:id/cancel` | passenger (owner) | cancel while valid |
 | `POST /ride-requests/:id/accept` | driver | accept into a new or existing pool |
+| `POST /ride-requests/:id/confirm` | passenger (owner) | agree to share, after being added to an existing pool |
+| `POST /ride-requests/:id/decline` | passenger (owner) | decline sharing — seat freed, back to `REQUESTED` |
 | `GET /pools/mine` | driver | your active pools |
 | `GET /pools/:id` | driver (owner) | pool detail + members |
 | `PATCH /pools/:id/arrive` | driver | mark driver arrived |
@@ -454,13 +474,23 @@ version of this answer).
   as the final answer.
 - **JWT in `localStorage`**, not httpOnly cookies — quick and standard for
   an MVP SPA, with the security trade-off documented rather than hidden.
+- **Passenger consent, but only for joining an existing pool** — a pool's
+  first member is auto-consented (requesting a ride at all is consent to
+  share if someone compatible turns up later); only the passenger being
+  *added* to a pool with a stranger already in it gets asked. Avoids the
+  driver ever waiting on two confirmations for the same pool. See
+  [DESIGN.md's "Passenger consent to pooling"](DESIGN.md#5-passenger-consent-to-pooling).
+- **Fare scales with seat count** — this was a real, shipped bug (a 1-seat
+  and 2-seat booking on an identical route billed identically) caught by
+  hand-testing the running app, not by any test that existed at the time.
+  See the same DESIGN.md section's fare-model correction.
 
 ## Known limitations
 
-- Frontend has not been visually verified in a live browser — it compiles
-  cleanly (`next build` succeeds, all routes generate) but no screenshot or
-  manual click-through has been done yet.
 - `docker compose up` has not been run end-to-end (see the note above).
+- No timeout if a passenger never responds to a pool-confirmation invitation
+  — the driver just waits, with no automatic expiry or fallback. Would need
+  a background job; named as a next improvement rather than built.
 - No real payment gateway — cash/TeslaPay are both simulated; TeslaPay
   wallet debit-on-payment is a schema (`wallets`) without a wired-up
   transfer flow yet.
@@ -474,6 +504,7 @@ version of this answer).
 
 ## Next improvements
 
+- Timeout/expiry for pending pool-confirmation invitations (background job).
 - Replace polling with websockets or SSE for live status.
 - Move seat-capacity contention off the primary DB (Redis-backed counter)
   if traffic grew enough to matter.
