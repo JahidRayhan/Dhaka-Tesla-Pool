@@ -142,18 +142,33 @@ Redis/queues just to look advanced).
 ## 3. Fare Model
 
 ```
-passengerFare = baseFare + distanceCharge - poolDiscount
+passengerFare = (baseFare + distanceCharge) × seatsRequested − poolDiscount
 ```
 
 - **Storage**: all money as integer **paisa** (1 taka = 100 paisa), `BIGINT`
   columns, never `DECIMAL`/`FLOAT`. Splitting a pooled fare across passengers
   with floating point invites rounding drift that doesn't reconcile; integers
   make every calculation exact and hand-checkable.
-- **`baseFare`**: flat fee per ride request. Assumption: **3000 paisa (৳30)**.
+- **`baseFare`**: flat fee per seat. Assumption: **3000 paisa (৳30)**.
 - **`distanceCharge`**: `ratePerKm × distanceKm`, where `distanceKm` is the
   haversine straight-line distance between the request's pickup and
   destination zone centroids (`zones.latitude/longitude`). Assumption:
   **ratePerKm = 1500 paisa/km (৳15/km)**.
+- **Both `baseFare` and `distanceCharge` scale by `seatsRequested`.** A
+  2-seat booking occupies twice the capacity of a 1-seat booking on the same
+  route, so it costs twice as much. (**Correction**: this was a real bug
+  caught by hand-testing after the fact, not something designed in from the
+  start — `seatsRequested` was accepted by the API and stored on the
+  ride_request, but never actually reached `computeBaseAndDistance`, so a
+  1-seat and a 2-seat booking on an identical route billed identically.
+  Fixed in `fareService.js` and its one call site in
+  `rideRequestService.createRequest`. The fix itself needed a second pass:
+  the first version rounded `rate × distance × seats` as one combined
+  value, which doesn't reliably give exactly double for 2 seats vs. 1 —
+  two independent roundings don't commute with multiplication, so they can
+  drift a paisa apart. Fixed by rounding the *per-seat* distance charge
+  once, then multiplying by an integer seat count — caught by the "costs
+  exactly double" test itself failing on the first attempt.)
 - **`poolDiscount`**: **20% of `distanceCharge`**, applied only if the pool's
   *final* membership has more than one passenger. "Final" is knowable for
   certain the moment the pool transitions `DRIVER_ARRIVED → STARTED`, because

@@ -67,9 +67,13 @@ POOL_ID=$(echo "$ACCEPT1" | node -pe "JSON.parse(require('fs').readFileSync(0,'u
 echo "pool=$POOL_ID"
 
 echo "--- Jashim accepts Rafiq into the SAME pool ---"
-curl -s -X POST localhost:4000/api/ride-requests/$RAFIQ_ID/accept -H "Authorization: Bearer $J" -H "Content-Type: application/json" \
-  -d "{\"teslaId\":\"$TESLA_ID\",\"poolId\":\"$POOL_ID\"}"
-echo
+ACCEPT2=$(curl -s -X POST localhost:4000/api/ride-requests/$RAFIQ_ID/accept -H "Authorization: Bearer $J" -H "Content-Type: application/json" \
+  -d "{\"teslaId\":\"$TESLA_ID\",\"poolId\":\"$POOL_ID\"}")
+echo "$ACCEPT2"
+echo "(joining an EXISTING pool lands in PENDING_CONFIRMATION — Rafiq must explicitly agree to share)"
+
+echo "--- Rafiq confirms sharing the ride ---"
+curl -s -X POST localhost:4000/api/ride-requests/$RAFIQ_ID/confirm -H "Authorization: Bearer $R" -w " confirm -> HTTP %{http_code}\n"
 
 echo "--- Jashim tries to accept Shirin into the SAME pool (should be REJECTED — different cluster) ---"
 curl -s -w "\nHTTP %{http_code}\n" -X POST localhost:4000/api/ride-requests/$SHIRIN_ID/accept -H "Authorization: Bearer $J" -H "Content-Type: application/json" \
@@ -94,6 +98,13 @@ wait
 echo "race A result:"; cat /tmp/race_a.json; echo
 echo "race B result:"; cat /tmp/race_b.json; echo
 
+echo "--- whichever request won the race must also confirm sharing before arrival ---"
+if grep -q '"poolId"' /tmp/race_a.json; then
+  curl -s -X POST localhost:4000/api/ride-requests/$RACE_A/confirm -H "Authorization: Bearer $N" -w " confirm winner A -> HTTP %{http_code}\n"
+else
+  curl -s -X POST localhost:4000/api/ride-requests/$RACE_B/confirm -H "Authorization: Bearer $R" -w " confirm winner B -> HTTP %{http_code}\n"
+fi
+
 echo "--- pool detail after all this ---"
 curl -s localhost:4000/api/pools/$POOL_ID -H "Authorization: Bearer $J" | node -pe "JSON.stringify(JSON.parse(require('fs').readFileSync(0,'utf8')).pool, null, 2)"
 
@@ -101,10 +112,10 @@ echo "--- driver marks arrive -> start (this is where fares finalize) ---"
 curl -s -X PATCH localhost:4000/api/pools/$POOL_ID/arrive -H "Authorization: Bearer $J" -w " arrive-> HTTP %{http_code}\n"
 curl -s -X PATCH localhost:4000/api/pools/$POOL_ID/start -H "Authorization: Bearer $J" -w " start -> HTTP %{http_code}\n"
 
-echo "--- Nusrat's final fare (expect 4800 paisa) ---"
+echo "--- Nusrat's final fare (expect 4738 paisa) ---"
 curl -s localhost:4000/api/ride-requests/$NUSRAT_ID -H "Authorization: Bearer $N" | node -pe "const r=JSON.parse(require('fs').readFileSync(0,'utf8')).rideRequest; JSON.stringify({status:r.status, base:r.base_fare_paisa, distance:r.distance_charge_paisa, discount:r.pool_discount_paisa, final:r.final_fare_paisa})"
 
-echo "--- Rafiq's final fare (expect 5040 paisa) ---"
+echo "--- Rafiq's final fare (expect 5054 paisa) ---"
 curl -s localhost:4000/api/ride-requests/$RAFIQ_ID -H "Authorization: Bearer $R" | node -pe "const r=JSON.parse(require('fs').readFileSync(0,'utf8')).rideRequest; JSON.stringify({status:r.status, base:r.base_fare_paisa, distance:r.distance_charge_paisa, discount:r.pool_discount_paisa, final:r.final_fare_paisa})"
 
 echo "--- cross-user access control: Rafiq tries to read Nusrat's ride (expect 403) ---"

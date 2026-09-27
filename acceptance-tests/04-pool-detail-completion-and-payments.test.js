@@ -40,6 +40,16 @@ async function requestAndAccept(token, destination, poolId) {
     .post(`/api/ride-requests/${req.body.rideRequest.id}/accept`)
     .set('Authorization', `Bearer ${jashimToken}`)
     .send({ teslaId, poolId });
+
+  // Joining an EXISTING pool (poolId given) now requires the passenger's own
+  // confirmation before the driver can arrive — see poolService.acceptRequest.
+  // A brand-new pool's first member is auto-consented and skips this.
+  if (poolId) {
+    await request(app)
+      .post(`/api/ride-requests/${req.body.rideRequest.id}/confirm`)
+      .set('Authorization', `Bearer ${token}`);
+  }
+
   return { rideRequestId: req.body.rideRequest.id, poolId: accept.body.poolId };
 }
 

@@ -24,7 +24,7 @@ async function createRequest(passengerId, { pickupZoneId, destinationZoneId, sea
     const pickupZone = await getZoneOrThrow(client, pickupZoneId, 'Pickup');
     const destinationZone = await getZoneOrThrow(client, destinationZoneId, 'Destination');
 
-    const { baseFarePaisa, distanceChargePaisa } = computeBaseAndDistance(pickupZone, destinationZone);
+    const { baseFarePaisa, distanceChargePaisa } = computeBaseAndDistance(pickupZone, destinationZone, seatsRequested);
 
     const { rows } = await client.query(
       `INSERT INTO ride_requests
@@ -57,6 +57,37 @@ async function createRequest(passengerId, { pickupZoneId, destinationZoneId, sea
   }
 }
 
+/**
+ * Attaches a `poolmates` array (name + destination only — never fares,
+ * which are each passenger's own private data) to each ride_request that
+ * has a pool_id, so a passenger can see who they're sharing a ride with.
+ * One batched query for however many rows are passed in, not N+1.
+ */
+async function attachPoolmates(rows) {
+  const poolIds = [...new Set(rows.filter((r) => r.pool_id).map((r) => r.pool_id))];
+  if (poolIds.length === 0) {
+    return rows.map((r) => ({ ...r, poolmates: [] }));
+  }
+
+  const { rows: mates } = await pool.query(
+    `SELECT rr.pool_id, rr.id, u.name AS passenger_name, dz.name AS destination_zone_name
+     FROM ride_requests rr
+     JOIN users u ON u.id = rr.passenger_id
+     JOIN zones dz ON dz.id = rr.destination_zone_id
+     WHERE rr.pool_id = ANY($1::uuid[]) AND rr.status NOT IN ('CANCELLED')`,
+    [poolIds],
+  );
+
+  return rows.map((r) => ({
+    ...r,
+    poolmates: r.pool_id
+      ? mates
+          .filter((m) => m.pool_id === r.pool_id && m.id !== r.id)
+          .map((m) => ({ name: m.passenger_name, destination: m.destination_zone_name }))
+      : [],
+  }));
+}
+
 async function listMine(passengerId) {
   const { rows } = await pool.query(
     `SELECT rr.*, pz.name AS pickup_zone_name, dz.name AS destination_zone_name
@@ -67,7 +98,7 @@ async function listMine(passengerId) {
      ORDER BY rr.requested_at DESC`,
     [passengerId],
   );
-  return rows;
+  return attachPoolmates(rows);
 }
 
 async function getByIdForUser(id, user) {
@@ -87,7 +118,8 @@ async function getByIdForUser(id, user) {
   if (!isOwner && !isAssignedDriver) {
     throw new ApiError(403, "You can't view another user's ride");
   }
-  return rideRequest;
+  const [enriched] = await attachPoolmates([rideRequest]);
+  return enriched;
 }
 
 /** Open requests a driver can consider accepting. MVP: no geospatial filter. */
@@ -127,8 +159,12 @@ async function cancel(passengerId, id, reason) {
 
     // "Cancel while valid" — Section 3. Not allowed once the driver has
     // arrived; the trip is effectively already underway from the rider's POV.
+    // PENDING_CONFIRMATION is cancellable too — distinct from declineJoin,
+    // which returns the passenger to REQUESTED (still wants a ride, just not
+    // this pool); cancelling here ends the request outright.
     const cancellable =
       rideRequest.status === 'REQUESTED' ||
+      rideRequest.status === 'PENDING_CONFIRMATION' ||
       (rideRequest.status === 'MATCHED' && rideRequest.pool_status === 'MATCHED');
 
     if (!cancellable) {

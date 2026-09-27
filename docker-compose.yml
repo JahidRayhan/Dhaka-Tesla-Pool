@@ -18,7 +18,12 @@ services:
       # why this is plain numbered SQL rather than a migration tool for the
       # MVP — see README "Tech Choices" for the trade-off.
       - ./migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
-      - ./seed/002_seed.sql:/docker-entrypoint-initdb.d/002_seed.sql:ro
+      # Mount target filenames control execution order here, not the source
+      # filenames — migrations/ and seed/ number independently within their
+      # own folders (both happen to have a "002_"), so the container-side
+      # names are renumbered to guarantee migrations run before the seed.
+      - ./migrations/002_add_pending_confirmation_status.sql:/docker-entrypoint-initdb.d/002_migration.sql:ro
+      - ./seed/002_seed.sql:/docker-entrypoint-initdb.d/003_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tesla -d dhaka_tesla_pool"]
       interval: 5s
