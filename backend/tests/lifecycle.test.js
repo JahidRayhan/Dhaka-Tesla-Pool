@@ -61,10 +61,18 @@ test('pooled fares finalize with the 20% discount only once the trip STARTS, not
 
   const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
   assert.equal(accept1.status, 200);
+  assert.equal(accept1.body.rideRequestStatus, 'MATCHED'); // first member — auto-consented
   const poolId = accept1.body.poolId;
 
   const accept2 = await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId });
   assert.equal(accept2.status, 200);
+  assert.equal(accept2.body.rideRequestStatus, 'PENDING_CONFIRMATION'); // joining an existing pool needs consent
+
+  // Rafiq must explicitly confirm before the driver can arrive.
+  const confirm = await request(app)
+    .post(`/api/ride-requests/${rafiqReq.body.rideRequest.id}/confirm`)
+    .set('Authorization', `Bearer ${tokens.rafiq}`);
+  assert.equal(confirm.status, 204);
 
   // Right after MATCHED: no discount applied yet — this is the bug caught
   // and fixed earlier (see DESIGN.md's "Correction" note).
@@ -85,6 +93,70 @@ test('pooled fares finalize with the 20% discount only once the trip STARTS, not
 
   assert.equal(nusratFinal.body.rideRequest.final_fare_paisa, '4738');
   assert.equal(rafiqFinal.body.rideRequest.final_fare_paisa, '5054');
+
+  // Each can see the other in their own poolmates list, but not fares.
+  assert.deepEqual(nusratFinal.body.rideRequest.poolmates, [{ name: 'Rafiq', destination: 'Gulshan 1' }]);
+});
+
+test('a driver cannot mark arrival while a passenger has not yet confirmed sharing the ride', async () => {
+  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
+  const rafiqReq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
+
+  const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
+  const poolId = accept1.body.poolId;
+  await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId }); // Rafiq never confirms
+
+  const arrive = await request(app).patch(`/api/pools/${poolId}/arrive`).set('Authorization', `Bearer ${tokens.jashim}`);
+  assert.equal(arrive.status, 409);
+});
+
+test('a passenger can decline joining a pool, freeing the seat and returning to REQUESTED', async () => {
+  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
+  const rafiqReq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
+
+  const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
+  const poolId = accept1.body.poolId;
+  await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId });
+
+  const decline = await request(app)
+    .post(`/api/ride-requests/${rafiqReq.body.rideRequest.id}/decline`)
+    .set('Authorization', `Bearer ${tokens.rafiq}`);
+  assert.equal(decline.status, 204);
+
+  const rafiqAfter = await request(app)
+    .get(`/api/ride-requests/${rafiqReq.body.rideRequest.id}`)
+    .set('Authorization', `Bearer ${tokens.rafiq}`);
+  assert.equal(rafiqAfter.body.rideRequest.status, 'REQUESTED');
+  assert.equal(rafiqAfter.body.rideRequest.pool_id, null);
+
+  const { rows } = await pool.query('SELECT seats_occupied FROM pools WHERE id = $1', [poolId]);
+  assert.equal(rows[0].seats_occupied, 1); // Rafiq's seat was freed, only Nusrat's remains
+
+  // The driver can now accept Rafiq's (still-open) request again if they want.
+  const reaccept = await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId });
+  assert.equal(reaccept.status, 200);
+});
+
+test('a passenger cannot confirm or decline a ride that is not awaiting confirmation', async () => {
+  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
+  // Still REQUESTED — never accepted into any pool.
+  const confirm = await request(app)
+    .post(`/api/ride-requests/${nusratReq.body.rideRequest.id}/confirm`)
+    .set('Authorization', `Bearer ${tokens.nusrat}`);
+  assert.equal(confirm.status, 409);
+});
+
+test("a passenger cannot confirm or decline someone else's pending ride request", async () => {
+  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
+  const rafiqReq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
+  const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
+  const poolId = accept1.body.poolId;
+  await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId });
+
+  const res = await request(app)
+    .post(`/api/ride-requests/${rafiqReq.body.rideRequest.id}/confirm`)
+    .set('Authorization', `Bearer ${tokens.nusrat}`); // Nusrat, not Rafiq
+  assert.equal(res.status, 403);
 });
 
 test('matching rule rejects an incompatible route from joining an existing pool', async () => {
