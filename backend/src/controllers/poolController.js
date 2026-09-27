@@ -7,6 +7,16 @@ const accept = asyncHandler(async (req, res) => {
   res.status(200).json(result);
 });
 
+const confirm = asyncHandler(async (req, res) => {
+  await poolService.confirmJoin(req.user.id, req.params.id);
+  res.status(204).send();
+});
+
+const decline = asyncHandler(async (req, res) => {
+  await poolService.declineJoin(req.user.id, req.params.id, req.body.reason);
+  res.status(204).send();
+});
+
 const listMine = asyncHandler(async (req, res) => {
   const pools = await poolService.listMineForDriver(req.user.id);
   res.json({ pools });
@@ -32,4 +42,4 @@ const complete = asyncHandler(async (req, res) => {
   res.status(204).send();
 });
 
-module.exports = { accept, listMine, getById, arrive, start, complete };
+module.exports = { accept, confirm, decline, listMine, getById, arrive, start, complete };
