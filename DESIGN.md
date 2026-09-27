@@ -227,6 +227,88 @@ debited on `paid_at`, no real payment gateway). `payments.status` starts
 `PENDING` and flips to `PAID` either immediately for `TESLAPAY` (synchronous
 debit) or manually by the driver for `CASH`.
 
+## 5. Passenger consent to pooling
+
+Not in the original brief — added after a genuinely good product question:
+if a passenger requests a solo trip, why should the system ever match them
+with a stranger without asking first? The original design didn't ask —
+`acceptRequest` matched a passenger into an existing pool unconditionally,
+the same way it created a brand-new one.
+
+**The fix**: a new `ride_request_status` value, `PENDING_CONFIRMATION`
+(`migrations/002_add_pending_confirmation_status.sql`), inserted between
+`REQUESTED` and `MATCHED` — but only on one of the two paths through
+`acceptRequest`:
+
+```mermaid
+stateDiagram-v2
+    [*] --> REQUESTED
+    REQUESTED --> MATCHED: driver starts a NEW pool (first member — implicit consent)
+    REQUESTED --> PENDING_CONFIRMATION: driver adds to an EXISTING pool
+    PENDING_CONFIRMATION --> MATCHED: passenger confirms
+    PENDING_CONFIRMATION --> REQUESTED: passenger declines (seat freed)
+    PENDING_CONFIRMATION --> CANCELLED: passenger cancels outright
+```
+
+**Why the asymmetry**: a pool's first member already consented to sharing
+the moment they requested a ride at all — that's the product's whole
+premise. It's only the *second* passenger, being added to a pool with a
+stranger already in it, who's agreeing to something they didn't know about
+when they made their request. Requiring confirmation from both members of
+every pool would mean the driver waits on two separate confirmations
+instead of one, with no clean way to handle one accepting and one
+refusing — asking only the newcomer avoids that entirely.
+
+**The seat is reserved before consent, not after.** `acceptRequest` still
+runs the same atomic capacity check and increments `seats_occupied`
+immediately — the difference is only which `ride_request.status` value it
+writes afterward. This preserves the concurrency guarantee (Section on
+Concurrency, above) without complicating it: a pending invitation still
+counts against capacity, so a second driver action can't accept a request
+into a pool that's actually full just because the first occupant hasn't
+confirmed yet.
+
+**Decline vs. cancel, and why they're different**: declining
+(`POST /ride-requests/:id/decline`) frees the seat and returns the
+ride_request to `REQUESTED` — the passenger still wants a ride, just not
+this particular pool, so the driver can offer them a different one later.
+Cancelling (`PATCH /ride-requests/:id/cancel`, already valid from
+`PENDING_CONFIRMATION` too) ends the request outright. Both free the seat
+the same way — the only difference is where the ride_request lands
+afterward.
+
+**A driver cannot mark arrival while anyone in the pool is still
+`PENDING_CONFIRMATION`** — arriving implies everyone actually coming has
+agreed to come. Enforced in `poolService.transitionPool` as a guard on the
+`MATCHED → DRIVER_ARRIVED` transition specifically.
+
+**Visibility, bundled in alongside consent**: while building this, a
+related gap became obvious — a passenger couldn't see who they were pooled
+with even *after* being matched, since that information only ever existed
+on the driver's pool-detail view. `rideRequestService` now attaches a
+`poolmates` array (name + destination only, never fares — that's each
+passenger's own private data) to both `GET /ride-requests/mine` and
+`GET /ride-requests/:id`.
+
+**Known limitation, deliberately not solved**: there's no timeout if a
+passenger never responds to a pending invitation — the driver is just stuck
+waiting, with no automatic fallback. A real fix needs a background job
+(expire after N minutes, free the seat, notify the driver), which is real
+added complexity for an MVP. Named here as a next improvement rather than
+built, same reasoning as not building websockets or a matching queue.
+
+**A real bug caught building this, worth being able to explain**: the first
+version of the status-write used one `UPDATE` with a single parameter doing
+double duty — assigned to the enum column (`status = $2`) *and* compared
+against a text literal in a `CASE` expression (`CASE WHEN $2 = 'MATCHED'...`)
+in the same statement. Postgres's parameter-type inference doesn't handle a
+placeholder appearing in two different type contexts within one statement
+well, and this failed with a real `500` the first time it actually ran
+against Postgres — not a hypothetical, an actual crash caught by running the
+new lifecycle tests. Fixed by splitting into two explicit branches (one
+`UPDATE` for the `MATCHED` case, one for `PENDING_CONFIRMATION`) instead of
+one clever conditional one — see `poolService.acceptRequest`.
+
 ---
 
 **Next**: Docker Compose (app + Postgres + migrations + seed data for
