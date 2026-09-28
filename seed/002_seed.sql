@@ -9,16 +9,40 @@
 -- Section 4 explicitly allows "plain lat/long points" over a real map API)
 -- ============================================================
 
-INSERT INTO zones (name, cluster, latitude, longitude) VALUES
-  ('Banani',      'gulshan_cluster',    23.7936, 90.4066),
-  ('Gulshan 1',   'gulshan_cluster',    23.7809, 90.4161),
-  ('Mohakhali',   'gulshan_cluster',    23.7806, 90.4058),
-  ('Niketon',     'gulshan_cluster',    23.7909, 90.4183),
-  ('Dhanmondi',   'dhanmondi_cluster',  23.7461, 90.3742),
-  ('Farmgate',    'dhanmondi_cluster',  23.7581, 90.3897),
-  ('Mirpur',      'mirpur_cluster',     23.8223, 90.3654),
-  ('Uttara',      'uttara_cluster',     23.8759, 90.3795),
-  ('Bashundhara', 'bashundhara_cluster',23.8145, 90.4485);
+INSERT INTO zones (name, latitude, longitude) VALUES
+  ('Banani',      23.7936, 90.4066),
+  ('Gulshan 1',   23.7809, 90.4161),
+  ('Mohakhali',   23.7806, 90.4058),
+  ('Niketon',     23.7909, 90.4183),
+  ('Dhanmondi',   23.7461, 90.3742),
+  ('Farmgate',    23.7581, 90.3897),
+  ('Mirpur',      23.8223, 90.3654),
+  ('Uttara',      23.8759, 90.3795),
+  ('Bashundhara', 23.8145, 90.4485);
+
+-- ============================================================
+-- ZONE EDGES (Section 4 — a small, fixed road graph instead of a flat tag)
+-- ============================================================
+-- Banani and Mohakhali are both real junctions here (degree 3 and 3), which
+-- is deliberate — it's what lets the matching rule actually demonstrate
+-- rejecting a branch-crossing trip, not just accepting anything nearby.
+
+INSERT INTO zone_edges (zone_a_id, zone_b_id)
+SELECT a.id, b.id FROM zones a, zones b WHERE a.name = 'Banani'    AND b.name = 'Gulshan 1'
+UNION ALL
+SELECT a.id, b.id FROM zones a, zones b WHERE a.name = 'Banani'    AND b.name = 'Mohakhali'
+UNION ALL
+SELECT a.id, b.id FROM zones a, zones b WHERE a.name = 'Banani'    AND b.name = 'Bashundhara'
+UNION ALL
+SELECT a.id, b.id FROM zones a, zones b WHERE a.name = 'Gulshan 1' AND b.name = 'Niketon'
+UNION ALL
+SELECT a.id, b.id FROM zones a, zones b WHERE a.name = 'Mohakhali' AND b.name = 'Farmgate'
+UNION ALL
+SELECT a.id, b.id FROM zones a, zones b WHERE a.name = 'Mohakhali' AND b.name = 'Mirpur'
+UNION ALL
+SELECT a.id, b.id FROM zones a, zones b WHERE a.name = 'Farmgate'  AND b.name = 'Dhanmondi'
+UNION ALL
+SELECT a.id, b.id FROM zones a, zones b WHERE a.name = 'Mirpur'    AND b.name = 'Uttara';
 
 -- ============================================================
 -- USERS
