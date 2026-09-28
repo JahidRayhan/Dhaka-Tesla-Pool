@@ -31,38 +31,60 @@ after(async () => {
   await pool.end();
 });
 
-async function requestAndAccept(token, destination, poolId) {
+// Requests a ride and has Jashim accept it. Joining an EXISTING pool opens an
+// all-party consent proposal (see poolService.acceptRequest): the newcomer
+// confirms for themselves, and every passenger already in the pool must
+// approve too — pass their tokens as `approvers` and this answers through the
+// real API exactly as their own screens would.
+async function requestAndAccept(token, { pickup = 'Banani', destination, poolId, approvers = [] }) {
   const req = await request(app)
     .post('/api/ride-requests')
     .set('Authorization', `Bearer ${token}`)
-    .send({ pickupZoneId: zones['Banani'], destinationZoneId: zones[destination], seatsRequested: 1 });
+    .send({ pickupZoneId: zones[pickup], destinationZoneId: zones[destination], seatsRequested: 1 });
   const accept = await request(app)
     .post(`/api/ride-requests/${req.body.rideRequest.id}/accept`)
     .set('Authorization', `Bearer ${jashimToken}`)
     .send({ teslaId, poolId });
 
-  // Joining an EXISTING pool (poolId given) now requires the passenger's own
-  // confirmation before the driver can arrive — see poolService.acceptRequest.
-  // A brand-new pool's first member is auto-consented and skips this.
   if (poolId) {
     await request(app)
       .post(`/api/ride-requests/${req.body.rideRequest.id}/confirm`)
       .set('Authorization', `Bearer ${token}`);
+    for (const approverToken of approvers) {
+      const mine = await request(app).get('/api/ride-requests/mine').set('Authorization', `Bearer ${approverToken}`);
+      for (const ride of mine.body.rideRequests) {
+        for (const q of ride.pendingConsents) {
+          await request(app).post(`/api/pool-consents/${q.id}/approve`).set('Authorization', `Bearer ${approverToken}`);
+        }
+      }
+    }
   }
 
   return { rideRequestId: req.body.rideRequest.id, poolId: accept.body.poolId };
 }
 
+// Nusrat rides Banani -> Farmgate; Rafiq is picked up along the way at
+// Mohakhali and also heads to Farmgate — a route that merges cleanly.
+async function pooledPair() {
+  const nusrat = await requestAndAccept(nusratToken, { destination: 'Farmgate' });
+  const rafiq = await requestAndAccept(rafiqToken, {
+    pickup: 'Mohakhali',
+    destination: 'Farmgate',
+    poolId: nusrat.poolId,
+    approvers: [nusratToken],
+  });
+  return { poolId: nusrat.poolId, nusratReqId: nusrat.rideRequestId, rafiqReqId: rafiq.rideRequestId };
+}
+
 test('a driver can see their active pool via GET /pools/mine', async () => {
-  const { poolId } = await requestAndAccept(nusratToken, 'Mohakhali');
+  const { poolId } = await requestAndAccept(nusratToken, { destination: 'Mohakhali' });
   const res = await request(app).get('/api/pools/mine').set('Authorization', `Bearer ${jashimToken}`);
   assert.equal(res.status, 200);
   assert.ok(res.body.pools.some((p) => p.id === poolId));
 });
 
 test('GET /pools/:id shows every member with their own individual fare', async () => {
-  const { poolId: p1 } = await requestAndAccept(nusratToken, 'Mohakhali');
-  await requestAndAccept(rafiqToken, 'Gulshan 1', p1);
+  const { poolId: p1 } = await pooledPair();
 
   const res = await request(app).get(`/api/pools/${p1}`).set('Authorization', `Bearer ${jashimToken}`);
   assert.equal(res.status, 200);
@@ -73,8 +95,7 @@ test('GET /pools/:id shows every member with their own individual fare', async (
 });
 
 test('completing a full trip moves both the pool and every passenger to COMPLETED, and creates a payment per passenger', async () => {
-  const { rideRequestId: nusratReqId, poolId } = await requestAndAccept(nusratToken, 'Mohakhali');
-  const { rideRequestId: rafiqReqId } = await requestAndAccept(rafiqToken, 'Gulshan 1', poolId);
+  const { poolId, nusratReqId, rafiqReqId } = await pooledPair();
 
   await request(app).patch(`/api/pools/${poolId}/arrive`).set('Authorization', `Bearer ${jashimToken}`);
   await request(app).patch(`/api/pools/${poolId}/start`).set('Authorization', `Bearer ${jashimToken}`);
@@ -102,13 +123,13 @@ test('completing a full trip moves both the pool and every passenger to COMPLETE
 });
 
 test('cannot complete a trip that has not been started yet', async () => {
-  const { poolId } = await requestAndAccept(nusratToken, 'Mohakhali');
+  const { poolId } = await requestAndAccept(nusratToken, { destination: 'Mohakhali' });
   const res = await request(app).patch(`/api/pools/${poolId}/complete`).set('Authorization', `Bearer ${jashimToken}`);
   assert.equal(res.status, 409);
 });
 
 test("a driver cannot view or advance another driver's pool", async () => {
-  const { poolId } = await requestAndAccept(nusratToken, 'Mohakhali');
+  const { poolId } = await requestAndAccept(nusratToken, { destination: 'Mohakhali' });
 
   // A second, unrelated driver — distinct from the role-guard tests in
   // 02-teslas-and-roles.test.js, this specifically checks the ownership
