@@ -1,4 +1,5 @@
 const poolService = require('../services/poolService');
+const consentService = require('../services/consentService');
 const { asyncHandler } = require('../utils/asyncHandler');
 
 const accept = asyncHandler(async (req, res) => {
@@ -14,6 +15,16 @@ const confirm = asyncHandler(async (req, res) => {
 
 const decline = asyncHandler(async (req, res) => {
   await poolService.declineJoin(req.user.id, req.params.id, req.body.reason);
+  res.status(204).send();
+});
+
+const approveConsent = asyncHandler(async (req, res) => {
+  await consentService.respond(req.user.id, req.params.id, 'ACCEPTED');
+  res.status(204).send();
+});
+
+const rejectConsent = asyncHandler(async (req, res) => {
+  await consentService.respond(req.user.id, req.params.id, 'DECLINED', req.body.reason);
   res.status(204).send();
 });
 
@@ -42,4 +53,4 @@ const complete = asyncHandler(async (req, res) => {
   res.status(204).send();
 });
 
-module.exports = { accept, confirm, decline, listMine, getById, arrive, start, complete };
+module.exports = { accept, confirm, decline, approveConsent, rejectConsent, listMine, getById, arrive, start, complete };
