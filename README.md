@@ -51,12 +51,12 @@ the system holds onto enough history to explain exactly what happened.
 - Request a ride (pickup, destination, seats) and see an estimated fare
   immediately, including a note that pooling can take up to 20% off
 - Track status: `REQUESTED → [PENDING_CONFIRMATION] → MATCHED → DRIVER_ARRIVED → STARTED → COMPLETED`, or `CANCELLED`
-- **Consent before sharing**: if a driver wants to add you to a pool that
-  already has someone else in it, your ride sits in `PENDING_CONFIRMATION` —
-  see who you'd be sharing with, then confirm or decline (declining keeps
-  your request open for a different pool). Only applies when *joining an
-  existing pool*; starting a fresh one is instant, since requesting a ride at
-  all is itself consent to share if the app later finds someone compatible
+- **All-party consent before sharing**: if a driver wants to add you to a pool
+  that already has people in it, *everyone* has to agree — each existing
+  member and you. Your ride sits in `PENDING_CONFIRMATION`; see who you'd be
+  sharing with, confirm or decline. A single "no" from anyone removes you from
+  the pool and frees your seat back to `REQUESTED`. Only applies when joining
+  an *existing* pool — starting a fresh one is instant, nobody to ask yet
 - See who you're currently sharing a ride with, once matched
 - View ride history
 - Cancel while the cancellation is still valid (before the driver arrives —
@@ -67,12 +67,15 @@ the system holds onto enough history to explain exactly what happened.
 - See open (unmatched) requests
 - Accept a request into a new pool, or add a compatible request to the Tesla's
   existing active pool (the added passenger must confirm before you can arrive)
+- See and answer proposals for adding a new passenger to your ride, once
+  matched into a pool
 - Mark driver-arrived → start trip → complete trip
 - See current pool's passengers, seats, confirmation status, and each
   passenger's fare
 
 **Pool / Ride split**
-- Multiple requests can share one Tesla, matched by a documented zone rule
+- Multiple requests can share one Tesla, matched by a real road-graph rule
+  (not a flat area tag) — see [Route-aware pooling](DESIGN.md#6-route-aware-pooling)
 - Occupied seats can never exceed the Tesla's capacity — enforced atomically
   even under concurrent requests for the same last seat, and reserved the
   moment a driver accepts, before the added passenger has even responded
@@ -114,6 +117,8 @@ erDiagram
     POOLS ||--o{ RIDE_REQUESTS : "carries"
     ZONES ||--o{ RIDE_REQUESTS : "pickup"
     ZONES ||--o{ RIDE_REQUESTS : "destination"
+    ZONES ||--o{ ZONE_EDGES : "connected by"
+    RIDE_REQUESTS ||--o{ POOL_JOIN_CONSENTS : "proposed / asked"
     RIDE_REQUESTS ||--o| PAYMENTS : "settled by"
     RIDE_REQUESTS ||--o{ STATUS_HISTORY : "logs"
     POOLS ||--o{ STATUS_HISTORY : "logs"
@@ -134,9 +139,20 @@ erDiagram
     ZONES {
         int id PK
         string name
-        string cluster
         float latitude
         float longitude
+    }
+    ZONE_EDGES {
+        int id PK
+        int zone_a_id FK
+        int zone_b_id FK
+    }
+    POOL_JOIN_CONSENTS {
+        uuid id PK
+        uuid proposal_id
+        uuid joiner_request_id FK
+        uuid member_request_id FK
+        string decision
     }
     POOLS {
         uuid id PK
@@ -192,26 +208,31 @@ Tesla's trip is at) and `ride_requests.status` (passenger-facing — what stage
 ## Fare model
 
 ```
-passengerFare = baseFare + distanceCharge - poolDiscount
+passengerFare = (baseFare + distanceCharge) × seatsRequested − poolDiscount
 ```
 
 - All money stored as **integer paisa** (1 taka = 100 paisa) — never
   floating point, to keep pool-split arithmetic exact.
-- `baseFare` = 3000 paisa (৳30) flat.
-- `distanceCharge` = 1500 paisa/km (৳15/km) × haversine distance between the
-  pickup/destination zone centroids.
+- `baseFare` = 3000 paisa (৳30) per seat.
+- `distanceCharge` = 1500 paisa/km (৳15/km) × the length of the request's
+  **shortest path across the zone road graph** (not a single straight-line
+  hop — see [Route-aware pooling](DESIGN.md#6-route-aware-pooling)), also
+  scaled per seat.
 - `poolDiscount` = 20% of `distanceCharge`, applied only once the pool's
   membership is final — at the `DRIVER_ARRIVED → STARTED` transition, since
   no one can join after `DRIVER_ARRIVED`. Before that, the passenger sees an
   honest **estimate** (base + distance, no discount assumed).
 
 **Worked example** (verified end-to-end against the running API, not
-hand-rounded — see `backend/smoketest.sh` and `backend/tests/fare.test.js`):
+hand-rounded — see `smoketest.sh` and `backend/tests/fare.test.js`). Nusrat
+rides Banani→Farmgate (via the Mohakhali junction); Rafiq is picked up along
+the way at Mohakhali, also to Farmgate — his whole trip is the second half of
+hers, so the two routes merge (section 6):
 
-| | Distance | Base | Distance charge | Discount | Final fare |
-|---|---|---|---|---|---|
-| Nusrat (Banani→Mohakhali) | 1.448 km | ৳30.00 | ৳21.72 | −৳4.34 | **৳47.38** |
-| Rafiq (Banani→Gulshan 1) | 1.711 km | ৳30.00 | ৳25.67 | −৳5.13 | **৳50.54** |
+| | Path | Distance | Base | Distance charge | Discount | Final fare |
+|---|---|---|---|---|---|---|
+| Nusrat | Banani→Mohakhali→Farmgate | 4.438 km | ৳30.00 | ৳66.58 | −৳13.32 | **৳83.26** |
+| Rafiq | Mohakhali→Farmgate | 2.991 km | ৳30.00 | ৳44.86 | −৳8.97 | **৳65.89** |
 
 Full derivation: [`DESIGN.md`](DESIGN.md#3-fare-model).
 
@@ -234,10 +255,12 @@ Full derivation: [`DESIGN.md`](DESIGN.md#3-fare-model).
 ```
 .
 ├── docker-compose.yml       # wires db + api + web together
-├── DESIGN.md                 # schema rationale, lifecycle rules, fare derivation
+├── DESIGN.md                 # schema rationale, lifecycle rules, routing, fare
 ├── migrations/
 │   ├── 001_init.sql          # full schema: tables, constraints, indexes, trigger
-│   └── 002_add_pending_confirmation_status.sql  # passenger consent to pooling
+│   ├── 002_add_pending_confirmation_status.sql  # PENDING_CONFIRMATION status
+│   ├── 003_add_zone_routing.sql                 # zone_edges graph, drops cluster
+│   └── 004_add_pool_join_consents.sql           # all-party consent table
 ├── seed/
 │   └── 002_seed.sql          # zones + Jashim/Bullet/Nusrat/Rafiq/Shirin
 ├── scripts/
@@ -251,7 +274,7 @@ Full derivation: [`DESIGN.md`](DESIGN.md#3-fare-model).
 │   │   ├── controllers/      # thin HTTP adapters
 │   │   ├── services/         # all business logic lives here
 │   │   └── utils/            # haversine, ApiError, asyncHandler
-│   ├── tests/                # fare unit tests + full lifecycle integration tests
+│   ├── tests/                # fare, routing, and full lifecycle integration tests
 │   └── smoketest.sh          # manual end-to-end story run against a live API
 └── frontend/
     ├── app/                   # Next.js App Router pages
@@ -303,7 +326,7 @@ docker compose up --build
 
 This brings up:
 - `db` — Postgres 16, schema + seed data applied automatically on first run
-  (via `migrations/001_init.sql`, `migrations/002_add_pending_confirmation_status.sql`,
+  (via `migrations/001_init.sql` through `004_add_pool_join_consents.sql`,
   and `seed/002_seed.sql`, mounted into
   Postgres's `docker-entrypoint-initdb.d`)
 - `api` — Express on `:4000`, waits for `db`'s health check before starting
@@ -326,6 +349,8 @@ Then open `http://localhost:3000`.
 createdb dhaka_tesla_pool
 psql -d dhaka_tesla_pool -f migrations/001_init.sql
 psql -d dhaka_tesla_pool -f migrations/002_add_pending_confirmation_status.sql
+psql -d dhaka_tesla_pool -f migrations/003_add_zone_routing.sql
+psql -d dhaka_tesla_pool -f migrations/004_add_pool_join_consents.sql
 psql -d dhaka_tesla_pool -f seed/002_seed.sql
 
 # 2. Backend
@@ -358,12 +383,18 @@ npm install
 ENV_FILE=.env.test npm test
 ```
 
-Expected: `18 pass, 0 fail` — 6 fare-model unit tests (no DB) and 12
-integration tests against a real Postgres instance, covering everything
-Section 12 asks for: capacity never exceeded (including under concurrent
-requests for the last seat), invalid transitions rejected, pooled fares
-calculated correctly, cross-user access blocked, cancellation rules, and one
-Tesla never running two pools at once.
+Expected: `48 pass, 0 fail` — 8 fare-model unit tests (no DB), 14 routing
+unit tests (no DB — this is where the branching-road scenario from
+DESIGN.md's routing section is pinned as a test, in both abstract-letter and
+real-zone form), and 26 integration tests against a real Postgres instance,
+covering everything Section 12 asks for plus the all-party consent and
+route-aware matching rules: capacity never exceeded (including under
+concurrent requests for the last seat), invalid transitions rejected, pooled
+fares calculated correctly, cross-user access blocked, cancellation rules,
+one Tesla never running two pools at once, every party's consent required to
+join an existing pool with a single veto sufficient to reject, and a
+newcomer's route rejected when it would require backtracking through a
+junction.
 
 ```bash
 # 2. acceptance-tests/ — organized by PRD requirement, one file per feature
@@ -375,7 +406,7 @@ TEST_DB_NAME=dhaka_tesla_pool_acceptance ../scripts/setup-test-db.sh
 ENV_FILE=.env.test npm test
 ```
 
-Expected: `23 pass, 0 fail`. This suite exists because checking the first
+Expected: `23 pass, 0 fail`. This suite exists because checking that suite
 suite against the PRD's Section 3 table line by line found real gaps —
 signup, login failures, `/auth/me`, unauthenticated/wrong-role access, ride
 history, Tesla registration and the online/offline toggle, the driver's
@@ -418,9 +449,11 @@ All endpoints under `/api`, JSON in/out, JWT via `Authorization: Bearer <token>`
 | `GET /ride-requests/open` | driver | unmatched requests |
 | `GET /ride-requests/:id` | owner or assigned driver | one ride's detail |
 | `PATCH /ride-requests/:id/cancel` | passenger (owner) | cancel while valid |
-| `POST /ride-requests/:id/accept` | driver | accept into a new or existing pool |
-| `POST /ride-requests/:id/confirm` | passenger (owner) | agree to share, after being added to an existing pool |
-| `POST /ride-requests/:id/decline` | passenger (owner) | decline sharing — seat freed, back to `REQUESTED` |
+| `POST /ride-requests/:id/accept` | driver | propose adding to a new or existing pool |
+| `POST /ride-requests/:id/confirm` | passenger (owner) | newcomer agrees to share |
+| `POST /ride-requests/:id/decline` | passenger (owner) | newcomer declines — seat freed, back to `REQUESTED` |
+| `POST /pool-consents/:id/approve` | passenger (asked) | existing member agrees to share with the proposed newcomer |
+| `POST /pool-consents/:id/reject` | passenger (asked) | existing member vetoes — newcomer removed, seat freed |
 | `GET /pools/mine` | driver | your active pools |
 | `GET /pools/:id` | driver (owner) | pool detail + members |
 | `PATCH /pools/:id/arrive` | driver | mark driver arrived |
@@ -466,20 +499,26 @@ version of this answer).
 - **A Tesla runs one active pool at a time** — not originally enforced;
   caught while building the driver UI (see AI usage) and fixed with the same
   row-lock pattern as the seat-capacity check.
-- **Matching rule**: same pickup zone, destination in the same `cluster`.
-  Simple, deterministic, avoids a real routing engine per Section 4's
-  instruction not to fight map APIs.
+- **Matching rule is a real road graph, not a flat area tag** — zones are
+  nodes, `zone_edges` says what's directly connected, and pooling compatibility
+  is "do these paths merge into one non-branching route, travelled the same
+  direction." This replaced an earlier `cluster` column that couldn't tell
+  "same general area" from "needs to backtrack through a junction," and as a
+  real consequence, changed which example pair of passengers can pool (see
+  [DESIGN.md's "Route-aware pooling"](DESIGN.md#6-route-aware-pooling)) —
+  deliberately more than Section 4 strictly asks for ("you do not need to
+  solve real routing"), a scope call worth being ready to defend either way.
 - **Polling, not websockets**, for live status updates. Correct and simple
   at this scale; named explicitly as a next improvement rather than treated
   as the final answer.
 - **JWT in `localStorage`**, not httpOnly cookies — quick and standard for
   an MVP SPA, with the security trade-off documented rather than hidden.
-- **Passenger consent, but only for joining an existing pool** — a pool's
-  first member is auto-consented (requesting a ride at all is consent to
-  share if someone compatible turns up later); only the passenger being
-  *added* to a pool with a stranger already in it gets asked. Avoids the
-  driver ever waiting on two confirmations for the same pool. See
-  [DESIGN.md's "Passenger consent to pooling"](DESIGN.md#5-passenger-consent-to-pooling).
+- **All-party consent for joining an existing pool** — every current member
+  and the newcomer must all agree; any single decline removes the newcomer.
+  An earlier version only asked the newcomer, which was wrong: existing
+  members never got a say about sharing with *this* person on *this* route.
+  A pool's first member has nobody to ask yet, so starting a fresh pool is
+  instant. See [DESIGN.md's "Consent to pooling"](DESIGN.md#5-consent-to-pooling-all-parties).
 - **Fare scales with seat count** — this was a real, shipped bug (a 1-seat
   and 2-seat booking on an identical route billed identically) caught by
   hand-testing the running app, not by any test that existed at the time.
@@ -497,14 +536,21 @@ version of this answer).
 - No rate limiting on any endpoint.
 - No pagination on `GET /ride-requests/open` — fine at demo scale, not at
   production scale.
-- Geography is a fixed zone list with straight-line distance, not real
-  routing (deliberately, per Section 4).
-- Zone → cluster assignment is a manual, hand-picked mapping, not derived
-  from real geographic adjacency data.
+- Geography is a fixed, hand-picked zone graph (which pairs are "directly
+  connected") rather than real map data — deliberately, per Section 4, though
+  the routing model itself (shortest path, junction-aware matching) is more
+  than the brief strictly requires.
+- The road network is assumed to have no cycles (a tree) — see DESIGN.md's
+  routing section for what that assumption buys and what breaks without it.
+- The compatibility rule is binary (no backtracking at all), not a bounded
+  detour ratio — the conservative reading of the rule, and simpler to reason
+  about, at the cost of rejecting some pools a human dispatcher might accept.
+- No timeout if a party never answers a pool-consent proposal — same
+  no-background-job limitation as the earlier one-sided version.
 
 ## Next improvements
 
-- Timeout/expiry for pending pool-confirmation invitations (background job).
+- Timeout/expiry for unanswered pool-consent proposals (background job).
 - Replace polling with websockets or SSE for live status.
 - Move seat-capacity contention off the primary DB (Redis-backed counter)
   if traffic grew enough to matter.
@@ -521,8 +567,8 @@ reasoning not implementation): load-balance stateless API instances behind
 a gateway; read replicas for the heavy read paths (`GET open requests`,
 history); move seat-capacity locking to a Redis-backed atomic counter per
 pool to take contention off Postgres; geospatial indexing (PostGIS
-`GIST`) instead of the flat zone-cluster table once real coordinates
-matter; a message queue between "ride requested" and "driver notified" to
+`GIST`) instead of the fixed zone graph once real road coordinates and a
+much larger zone count matter; a message queue between "ride requested" and "driver notified" to
 decouple matching from delivery; WebSocket/SSE gateway for live updates
 instead of polling; idempotency keys on `accept`/state-transition endpoints
 so retried requests under load can't double-apply; per-user and per-IP rate
