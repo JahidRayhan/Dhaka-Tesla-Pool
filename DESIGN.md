@@ -1,7 +1,11 @@
-# Dhaka Tesla Pool — Schema, Lifecycle & Fare Model (v1)
+# Dhaka Tesla Pool — Schema, Lifecycle, Routing & Fare Model
 
-Cast: **Jashim** (driver) owns **Bullet** (3-seat Tesla). **Nusrat** (Banani→Mohakhali),
-**Rafiq** (Banani→Gulshan 1), **Shirin** (arrives 30s later) are passengers.
+Cast: **Jashim** (driver) owns **Bullet** (3-seat Tesla). **Nusrat** (Banani→Farmgate),
+**Rafiq** (Mohakhali→Farmgate — picked up along the way), **Shirin**
+(Banani→Bashundhara — a different branch entirely) are passengers. An earlier
+version of this doc used Nusrat: Banani→Mohakhali and Rafiq: Banani→Gulshan 1
+as the flagship pair; the junction-aware routing rule in section 6 shows why
+that pair can't actually share a vehicle, so the example changed with it.
 
 ## 1. Entity-Relationship Diagram
 
@@ -14,6 +18,9 @@ erDiagram
     POOLS ||--o{ RIDE_REQUESTS : "carries"
     ZONES ||--o{ RIDE_REQUESTS : "pickup"
     ZONES ||--o{ RIDE_REQUESTS : "destination"
+    ZONES ||--o{ ZONE_EDGES : "connected by"
+    RIDE_REQUESTS ||--o{ POOL_JOIN_CONSENTS : "proposed as joiner"
+    RIDE_REQUESTS ||--o{ POOL_JOIN_CONSENTS : "asked as member"
     RIDE_REQUESTS ||--o| PAYMENTS : "settled by"
     RIDE_REQUESTS ||--o{ STATUS_HISTORY : "logs"
     POOLS ||--o{ STATUS_HISTORY : "logs"
@@ -34,9 +41,20 @@ erDiagram
     ZONES {
         int id PK
         string name
-        string cluster
         float latitude
         float longitude
+    }
+    ZONE_EDGES {
+        int id PK
+        int zone_a_id FK
+        int zone_b_id FK
+    }
+    POOL_JOIN_CONSENTS {
+        uuid id PK
+        uuid proposal_id
+        uuid joiner_request_id FK
+        uuid member_request_id FK
+        string decision
     }
     POOLS {
         uuid id PK
@@ -50,6 +68,7 @@ erDiagram
         int pickup_zone_id FK
         int destination_zone_id FK
         uuid pool_id FK
+        int_array route_zone_ids
         string status
         bigint final_fare_paisa
     }
@@ -80,9 +99,12 @@ Two status fields, updated together but independently visible:
 ```mermaid
 stateDiagram-v2
     [*] --> REQUESTED
-    REQUESTED --> MATCHED: driver accepts (capacity check)
+    REQUESTED --> MATCHED: driver starts a NEW pool
+    REQUESTED --> PENDING_CONFIRMATION: driver proposes joining an EXISTING pool
+    PENDING_CONFIRMATION --> MATCHED: EVERYONE agrees
+    PENDING_CONFIRMATION --> REQUESTED: ANYONE declines
     REQUESTED --> CANCELLED: passenger cancels
-    MATCHED --> MATCHED: another passenger joins same pool
+    PENDING_CONFIRMATION --> CANCELLED: passenger cancels
     MATCHED --> DRIVER_ARRIVED: driver marks arrival (pool-level)
     MATCHED --> CANCELLED: passenger or driver cancels
     DRIVER_ARRIVED --> STARTED: driver starts trip (pool-level, locks pool)
@@ -95,12 +117,14 @@ stateDiagram-v2
 
 | Transition | Actor | Guard |
 |---|---|---|
-| `REQUESTED → MATCHED` | driver | `pool.seats_occupied + seats_requested <= tesla.capacity`, checked and updated in one DB transaction |
-| new request joins existing `MATCHED` pool | driver | pool must still be in `MATCHED` (not yet `DRIVER_ARRIVED`); same guard as above |
-| `MATCHED → DRIVER_ARRIVED` | driver | applies to the whole pool; every `MATCHED` ride_request in it flips too |
+| `REQUESTED → MATCHED` | driver | starting a NEW pool — nobody to ask. `seats_requested <= tesla.capacity`; the Tesla has no other active pool |
+| `REQUESTED → PENDING_CONFIRMATION` | driver | joining an EXISTING `MATCHED` pool (not yet `DRIVER_ARRIVED`): the newcomer's route must merge with every current member's (section 6), no other proposal may be open, and `seats_occupied + seats_requested <= capacity` — checked and updated in one DB transaction. Opens a consent proposal (section 5) |
+| `PENDING_CONFIRMATION → MATCHED` | passengers | **every** party — each existing member and the newcomer — has approved |
+| `PENDING_CONFIRMATION → REQUESTED` | passengers | **any** party declined; seat freed, request returns to the open pool |
+| `MATCHED → DRIVER_ARRIVED` | driver | applies to the whole pool; every `MATCHED` ride_request in it flips too. Blocked while any newcomer is still `PENDING_CONFIRMATION` |
 | `DRIVER_ARRIVED → STARTED` | driver | pool is now locked — no further joins, fares are already final |
 | `STARTED → COMPLETED` | driver | applies to the whole pool |
-| `→ CANCELLED` | passenger or driver | only from `REQUESTED` or `MATCHED` ("cancel while valid" — Section 3). After `DRIVER_ARRIVED` a ride cannot be self-cancelled by the passenger in this MVP |
+| `→ CANCELLED` | passenger or driver | only from `REQUESTED`, `PENDING_CONFIRMATION` or `MATCHED` ("cancel while valid" — Section 3). After `DRIVER_ARRIVED` a ride cannot be self-cancelled by the passenger in this MVP |
 
 **Assumption (documented per Section 17):** pools stop accepting new passengers
 once the driver has marked arrival. Letting people join after arrival would need
@@ -151,9 +175,16 @@ passengerFare = (baseFare + distanceCharge) × seatsRequested − poolDiscount
   make every calculation exact and hand-checkable.
 - **`baseFare`**: flat fee per seat. Assumption: **3000 paisa (৳30)**.
 - **`distanceCharge`**: `ratePerKm × distanceKm`, where `distanceKm` is the
-  haversine straight-line distance between the request's pickup and
-  destination zone centroids (`zones.latitude/longitude`). Assumption:
-  **ratePerKm = 1500 paisa/km (৳15/km)**.
+  length of the request's **shortest path across the zone road graph**
+  (section 6): the sum of the haversine distance of each edge along the way,
+  each computed from its two zones' lat/lng. Assumption: **ratePerKm = 1500
+  paisa/km (৳15/km)**. For two directly connected zones the path is a single
+  edge, so the number is identical to the old straight-line figure — Banani →
+  Mohakhali is still 1.448 km. For zones further apart it is now the real
+  road-following distance, which is never shorter than the straight line
+  (Banani → Farmgate is 4.438 km via Mohakhali, not a straight-line hop). Fare
+  arithmetic takes the distance as an input; routing owns *how far*, the fare
+  model owns *what that costs*.
 - **Both `baseFare` and `distanceCharge` scale by `seatsRequested`.** A
   2-seat booking occupies twice the capacity of a 1-seat booking on the same
   route, so it costs twice as much. (**Correction**: this was a real bug
@@ -185,40 +216,42 @@ passengerFare = (baseFare + distanceCharge) × seatsRequested − poolDiscount
 
 ### Worked example (hand-checkable — verified against the running API, not hand-rounded)
 
-Zone centroids are in `seed/002_seed.sql`. Haversine distance from Banani
-(23.7936, 90.4066):
+Zone coordinates are in `seed/002_seed.sql`, road edges in the same file.
+**Nusrat** rides Banani → Farmgate, whose shortest path is Banani → Mohakhali →
+Farmgate. **Rafiq** is picked up at Mohakhali — *along the way* — and rides to
+Farmgate too. His whole trip is the second half of hers, in the same direction,
+so the two routes merge into one (section 6). Jashim marks `DRIVER_ARRIVED` then
+`STARTED` with both in the pool, so the discount finalizes for both at that
+point:
 
-| Route | Distance |
-|---|---|
-| Banani → Mohakhali (Nusrat) | 1.448 km |
-| Banani → Gulshan 1 (Rafiq) | 1.711 km |
-
-Both requests match (same pickup zone `Banani`, destinations in the same
-`gulshan_cluster`) and land in the same pool on Bullet. Jashim marks
-`DRIVER_ARRIVED` then `STARTED` with both still in the pool, so the discount
-finalizes for both of them at that point:
+| Route | Path | Distance |
+|---|---|---|
+| Nusrat: Banani → Farmgate | Banani → Mohakhali → Farmgate | 1.448 + 2.991 = **4.438 km** |
+| Rafiq: Mohakhali → Farmgate | Mohakhali → Farmgate | **2.991 km** |
 
 **Nusrat**
 - `baseFare` = 3000
-- `distanceCharge` = round(1500 × 1.448) = 2172
-- `poolDiscount` = round(20% × 2172) = 434
-- `passengerFare` = 3000 + 2172 − 434 = **4738 paisa = ৳47.38**
+- `distanceCharge` = round(1500 × 4.4384) = 6658
+- `poolDiscount` = round(20% × 6658) = 1332
+- `passengerFare` = 3000 + 6658 − 1332 = **8326 paisa = ৳83.26**
+  (estimate shown before pooling: ৳96.58)
 
 **Rafiq**
 - `baseFare` = 3000
-- `distanceCharge` = round(1500 × 1.711) = 2567
-- `poolDiscount` = round(20% × 2567) = 513
-- `passengerFare` = 3000 + 2567 − 513 = **5054 paisa = ৳50.54**
+- `distanceCharge` = round(1500 × 2.9906) = 4486
+- `poolDiscount` = round(20% × 4486) = 897
+- `passengerFare` = 3000 + 4486 − 897 = **6589 paisa = ৳65.89**
+  (estimate shown before pooling: ৳74.86)
 
-These exact numbers were reproduced by an end-to-end run against the actual
-API and Postgres (seed data → login → request → accept → arrive → start),
-not computed by hand separately from the code — see `smoketest.sh`.
+These exact numbers are produced by `smoketest.sh` end to end against the real
+API and Postgres, and pinned in `backend/tests/fare.test.js` and
+`backend/tests/lifecycle.test.js`.
 
-**Shirin**, arriving 30s later requesting a route *outside* the
-`gulshan_cluster` (e.g. to Mirpur), fails the matching rule and does **not**
-join Bullet's pool — she gets a new solo request (no `poolDiscount`) or is
-queued for another Tesla. This is the edge case worth showing in the demo
-video (Section 13).
+**Shirin** requests Banani → Bashundhara — a different branch off the Banani
+junction. Her route can't merge with the pool's (section 6), so the driver's
+attempt to add her is rejected with a 422 and she stays an open, solo request
+(no `poolDiscount`), free to be picked up by another Tesla. This is the edge
+case worth showing in the demo video (Section 13).
 
 ## 4. Payment
 
@@ -227,90 +260,191 @@ debited on `paid_at`, no real payment gateway). `payments.status` starts
 `PENDING` and flips to `PAID` either immediately for `TESLAPAY` (synchronous
 debit) or manually by the driver for `CASH`.
 
-## 5. Passenger consent to pooling
+## 5. Consent to pooling (all parties)
 
-Not in the original brief — added after a genuinely good product question:
-if a passenger requests a solo trip, why should the system ever match them
-with a stranger without asking first? The original design didn't ask —
-`acceptRequest` matched a passenger into an existing pool unconditionally,
-the same way it created a brand-new one.
+Not in the original brief — it came from two product questions asked while
+using the running app. The first: why should the system ever match a passenger
+who requested a solo trip with a stranger without asking? The second, after a
+first fix: why is only the *newcomer* asked?
 
-**The fix**: a new `ride_request_status` value, `PENDING_CONFIRMATION`
-(`migrations/002_add_pending_confirmation_status.sql`), inserted between
-`REQUESTED` and `MATCHED` — but only on one of the two paths through
-`acceptRequest`:
+**Version 1 was one-sided, and that was a mistake.** It asked only the
+passenger being added, on the reasoning that a pool's first member "already
+consented by requesting a ride at all." That only covers sharing *in the
+abstract*. Nusrat never agreed to share with Rafiq specifically, going where he
+is going. The real reason I avoided asking her was that two-sided consent is
+harder to build — not that it was wrong. It's now all-party.
+
+**The rule**: when a driver proposes adding a passenger to a pool that already
+has people in it, *every* affected party has to say yes — each existing member
+and the newcomer. **Any single "no" removes the newcomer** from the pool and
+returns them to `REQUESTED`.
 
 ```mermaid
 stateDiagram-v2
     [*] --> REQUESTED
-    REQUESTED --> MATCHED: driver starts a NEW pool (first member — implicit consent)
-    REQUESTED --> PENDING_CONFIRMATION: driver adds to an EXISTING pool
-    PENDING_CONFIRMATION --> MATCHED: passenger confirms
-    PENDING_CONFIRMATION --> REQUESTED: passenger declines (seat freed)
-    PENDING_CONFIRMATION --> CANCELLED: passenger cancels outright
+    REQUESTED --> MATCHED: driver starts a NEW pool (nobody to ask)
+    REQUESTED --> PENDING_CONFIRMATION: driver proposes joining an EXISTING pool
+    PENDING_CONFIRMATION --> MATCHED: EVERY party approved
+    PENDING_CONFIRMATION --> REQUESTED: ANY party declined (seat freed)
+    PENDING_CONFIRMATION --> CANCELLED: newcomer cancels outright
 ```
 
-**Why the asymmetry**: a pool's first member already consented to sharing
-the moment they requested a ride at all — that's the product's whole
-premise. It's only the *second* passenger, being added to a pool with a
-stranger already in it, who's agreeing to something they didn't know about
-when they made their request. Requiring confirmation from both members of
-every pool would mean the driver waits on two separate confirmations
-instead of one, with no clean way to handle one accepting and one
-refusing — asking only the newcomer avoids that entirely.
+A pool's very first member is the one case with nobody to ask, so it goes
+straight to `MATCHED`.
 
-**The seat is reserved before consent, not after.** `acceptRequest` still
-runs the same atomic capacity check and increments `seats_occupied`
-immediately — the difference is only which `ride_request.status` value it
-writes afterward. This preserves the concurrency guarantee (Section on
-Concurrency, above) without complicating it: a pending invitation still
-counts against capacity, so a second driver action can't accept a request
-into a pool that's actually full just because the first occupant hasn't
-confirmed yet.
+**Storage** — `pool_join_consents` (`migrations/004`): one row per party per
+proposal (`PENDING → ACCEPTED | DECLINED | VOID`), all sharing a `proposal_id`.
+The joiner's own answer is a row too (`member_request_id = joiner_request_id`),
+so every party is handled by exactly one mechanism rather than the newcomer
+being a special case. `resolveProposal` (in `consentService`) looks at a
+proposal's rows after each answer: any `DECLINED` → reject the joiner; all
+`ACCEPTED` → promote them; otherwise keep waiting.
 
-**Decline vs. cancel, and why they're different**: declining
-(`POST /ride-requests/:id/decline`) frees the seat and returns the
-ride_request to `REQUESTED` — the passenger still wants a ride, just not
-this particular pool, so the driver can offer them a different one later.
-Cancelling (`PATCH /ride-requests/:id/cancel`, already valid from
-`PENDING_CONFIRMATION` too) ends the request outright. Both free the seat
-the same way — the only difference is where the ride_request lands
-afterward.
+**Why a `proposal_id`.** A joiner can be proposed more than once (declined,
+returned to `REQUESTED`, proposed again). Without a per-round id, a stale
+`DECLINED` row from the first round would wrongly auto-reject the second. I
+caught this reviewing my own first draft of the migration, before it shipped.
 
-**A driver cannot mark arrival while anyone in the pool is still
-`PENDING_CONFIRMATION`** — arriving implies everyone actually coming has
-agreed to come. Enforced in `poolService.transitionPool` as a guard on the
-`MATCHED → DRIVER_ARRIVED` transition specifically.
+**The seat is reserved before anyone answers, not after.** Accepting a proposal
+still runs the same atomic capacity check and increments `seats_occupied`
+immediately — a pending newcomer counts against capacity, so a second action
+can't oversell a seat just because the first newcomer hasn't been approved yet.
+A decline frees it again in the same transaction.
 
-**Visibility, bundled in alongside consent**: while building this, a
-related gap became obvious — a passenger couldn't see who they were pooled
-with even *after* being matched, since that information only ever existed
-on the driver's pool-detail view. `rideRequestService` now attaches a
-`poolmates` array (name + destination only, never fares — that's each
-passenger's own private data) to both `GET /ride-requests/mine` and
-`GET /ride-requests/:id`.
+**One open proposal per pool.** The driver can't propose a second newcomer
+while the first is unresolved. Otherwise the existing members would be
+consenting to a group that doesn't exist yet, and the second newcomer's
+consent set would have to include someone who isn't a member yet.
 
-**Known limitation, deliberately not solved**: there's no timeout if a
-passenger never responds to a pending invitation — the driver is just stuck
-waiting, with no automatic fallback. A real fix needs a background job
-(expire after N minutes, free the seat, notify the driver), which is real
-added complexity for an MVP. Named here as a next improvement rather than
-built, same reasoning as not building websockets or a matching queue.
+**A member who cancels mid-proposal can't strand the newcomer.** Cancelling
+voids that member's open question and re-evaluates each affected proposal — if
+their answer was the only one outstanding, the newcomer is promoted rather than
+left waiting for a reply that can never arrive. Likewise a newcomer who cancels
+withdraws every question that was put to the others.
 
-**A real bug caught building this, worth being able to explain**: the first
-version of the status-write used one `UPDATE` with a single parameter doing
-double duty — assigned to the enum column (`status = $2`) *and* compared
-against a text literal in a `CASE` expression (`CASE WHEN $2 = 'MATCHED'...`)
-in the same statement. Postgres's parameter-type inference doesn't handle a
-placeholder appearing in two different type contexts within one statement
-well, and this failed with a real `500` the first time it actually ran
-against Postgres — not a hypothetical, an actual crash caught by running the
-new lifecycle tests. Fixed by splitting into two explicit branches (one
-`UPDATE` for the `MATCHED` case, one for `PENDING_CONFIRMATION`) instead of
-one clever conditional one — see `poolService.acceptRequest`.
+**Decline vs. cancel.** A newcomer *declining* (or being vetoed) goes back to
+`REQUESTED` — they still want a ride, just not this pool. *Cancelling* ends the
+request outright.
+
+**A driver cannot mark arrival while any newcomer is `PENDING_CONFIRMATION`** —
+arriving implies everyone actually coming has agreed to come.
+
+**What each passenger sees.** An existing member gets a `pendingConsents` list
+on `GET /ride-requests/mine`: who is being proposed, where they'd be picked up,
+where they're going, and approve/reject buttons. The newcomer sees who they'd
+be sharing with and, once they've answered, who hasn't yet (`waitingOn`).
+Names and destinations only — never fares, which stay each passenger's own.
+
+**Known limitation, deliberately not solved**: there is no timeout if someone
+never answers — the driver just waits, and can't withdraw the proposal. A real
+fix needs a background job (expire after N minutes, free the seat, notify the
+driver), which is real added complexity for an MVP. Named as a next improvement.
+
+**A real Postgres bug hit while building this, worth being able to explain**:
+the first status-write used one `UPDATE` where a single parameter did double
+duty — assigned to the enum column (`status = $2`) *and* compared against a text
+literal in a `CASE` (`CASE WHEN $2 = 'MATCHED'…`) in the same statement.
+Postgres's parameter-type inference doesn't cope with one placeholder in two
+type contexts, and it failed with a real 500 the first time it ran. Fixed by
+splitting into two explicit branches instead of one clever conditional one.
+
+## 6. Route-aware pooling
+
+**The gap this closes.** The original matching rule was "same pickup zone, and
+destination in the same `cluster`" — a flat tag on each zone. It had no idea
+of *order*, *direction*, or *junctions*. Picture a trunk road `a-b-c-d-e` with
+a branch `c-f-g-h` splitting off at `c`. Someone going `a→d` and someone going
+`b→e` obviously share a vehicle. Someone going `c→g` obviously can't join
+either of them: continuing on to `d` or `e` and turning off onto the branch at
+`c` are mutually exclusive, and getting from `e` to `f` means driving back to
+`c` first. A cluster tag can't express that — it would have happily pooled all
+three.
+
+**The model.** Zones are graph nodes, and `zone_edges` (`migrations/003`) says
+which pairs are *directly* road-connected. Edges are undirected and store no
+distance: it's derived from the two zones' lat/lng with the same haversine
+helper the fare model always used, so there's no second distance figure to keep
+in sync. `cluster` was dropped from `zones` — leaving an unused, misleading
+column around would be worse than removing it.
+
+```
+Gulshan 1 — Banani — Mohakhali — Farmgate — Dhanmondi
+   |          |          |
+Niketon   Bashundhara   Mirpur — Uttara
+```
+
+Banani (Gulshan 1 / Mohakhali / Bashundhara) and Mohakhali (Banani / Farmgate /
+Mirpur) are genuine junctions, which is what lets the rule be demonstrated on
+real data rather than only on abstract letters.
+
+**Each request gets a path.** At creation, `routeService.shortestPath` runs
+Dijkstra over the graph (O(V²), fine for nine zones; no priority queue needed)
+and stores the ordered zone ids on `ride_requests.route_zone_ids`. The path's
+length drives the fare (section 3); the path itself drives the matching rule.
+
+**The compatibility rule** (`routeService.routesAreCompatible`): can every
+request's directed path be served by *one* vehicle on *one* continuous,
+non-branching route? Two checks:
+
+1. **Shape.** Take the undirected union of every path's edges. It has to be a
+   simple path: no zone may touch more than two distinct neighbours across all
+   the paths combined (that would be a true branch point where the routes go
+   three different ways), and the union has to be one connected piece. This is
+   the check that rejects `c→g` joining `a→d`: `c` would touch `b`, `d` *and*
+   `f`.
+2. **Direction.** Shape alone isn't enough — a simple path can be driven either
+   way, and every request has to travel the *same* way along it. Two riders
+   who start at the same zone but head to opposite sides of it pass the shape
+   check and fail here.
+
+| Pair | Verdict | Why |
+|---|---|---|
+| `a→d` + `b→e` | pool | overlap along the trunk, same direction |
+| `a→d` + `c→g` | **no** | `c` would have three neighbours |
+| `b→e` + `c→g` | **no** | same |
+| `a→c` + `c→g` | pool | the first trip *ends* at the junction, so nothing continues down the trunk |
+| `a→d` + `d→b` | **no** | opposite directions along one road |
+| Banani→Farmgate + Mohakhali→Farmgate | pool | second rider picked up along the way |
+| Banani→Mohakhali + Banani→Mirpur | pool | Mirpur lies straight on past Mohakhali |
+| Banani→Mohakhali + Banani→Gulshan 1 | **no** | same origin, opposite sides of Banani |
+| Banani→Mohakhali + Banani→Bashundhara | **no** | different branches off Banani |
+
+All of these are pinned in `backend/tests/routing.test.js` (the abstract
+letters as pure-function tests, the Dhaka rows against the real seeded graph).
+
+**A consequence I did not expect, worth being upfront about.** The flagship
+example used through most of this project — Nusrat Banani→Mohakhali and Rafiq
+Banani→Gulshan 1 — **fails this rule**. Both start at Banani, but Mohakhali and
+Gulshan 1 are on opposite sides of it, so the vehicle would have to drop one and
+drive back through the Banani junction to reach the other: exactly the
+backtracking the rule exists to forbid. The old cluster tag only "worked"
+because it never asked the question. Rather than quietly relax the rule to keep
+the old example, the example changed (section 3). The rule also now allows
+something the old one couldn't: **different pickup zones**. The old rule
+required an identical pickup; the new one accepts anyone whose route merges,
+including a rider picked up mid-route.
+
+**Assumption: the road network is a tree** (no cycles). On a tree, any two
+zones have exactly one simple path and the shape check is airtight. With cycles
+(a ring road, say) two requests could have several possible routes and the
+check would need to search over them, not just take the shortest. For a fixed
+nine-zone graph that is a reasonable, documented simplification.
+
+**A deliberate simplification, not a claim of optimality.** Real ride-pooling
+systems accept *bounded* detours — a small zigzag to serve two nearby stops
+beats refusing the pool outright. This rule is binary: no backtracking at all.
+It's the conservative reading of "you can't go to f from e without backing
+till c," and it errs toward rejecting a marginal pool rather than accepting a
+bad one. A detour-ratio threshold (pool if total distance ≤ k × the sum of solo
+distances) is the natural next step; it needs a small ordering search over
+pickups and drop-offs, and a value of `k` that only real trip data could
+justify — which is why it isn't guessed at here.
+
+**Cost.** `loadGraph` re-reads zones and edges on each call rather than caching
+them. The graph is tiny and effectively static, so that's cheaper than cache
+invalidation at this scale; it would be the first thing to cache if it ever
+showed up in a profile.
 
 ---
 
-**Next**: Docker Compose (app + Postgres + migrations + seed data for
-Jashim/Bullet/Nusrat/Rafiq/Shirin), then the Express API implementing the
-transitions above.
+**Next**: see the README for setup, the API reference, and known limitations.

@@ -8,14 +8,16 @@ demonstrating things on screen.
 
 **Before you hit record:**
 - Have the app running (Docker Compose or manual) with fresh seed data
-- Two browser windows/tabs logged in as different demo users (e.g. Nusrat
-  and Jashim) so you can flip between passenger and driver views live
+- Three browser windows/tabs logged in as Nusrat, Rafiq, and Jashim, so you
+  can flip between passenger and driver views live
 - `DESIGN.md`'s architecture diagram and ERD open in a tab, ready to show
-- Know which edge case you're demoing (script below uses Shirin's
-  incompatible-route rejection — easy to trigger live by clicking; the
-  seat-race concurrency case is real but hard to time by hand, so it's
-  mentioned as "tested automatically" rather than demoed live — see the note
-  in the 3:00–6:00 section)
+- Know your route: Nusrat requests Banani→Farmgate (which passes through the
+  Mohakhali junction), Rafiq requests Mohakhali→Farmgate (picked up along
+  the way), Shirin requests Banani→Bashundhara (a different branch off the
+  same junction — this is the rejection to demo live). The seat-race
+  concurrency case is real but hard to time by hand, so it's mentioned as
+  "tested automatically" rather than demoed live (see the note in the
+  3:00–6:00 section)
 
 ---
 
@@ -26,21 +28,22 @@ demonstrating things on screen.
 > The problem here is basically Dhaka rush hour, compressed into one street
 > corner. Jashim's parked with Bullet, his three-seat battery rickshaw, and
 > within about two minutes, three strangers show up wanting rides that
-> overlap — but not exactly. Nusrat's headed to Mohakhali, Rafiq's headed to
-> Gulshan 1, both starting from Banani. Close enough in direction and
-> distance that pooling them makes sense. Then Shirin shows up wanting to
-> go somewhere completely different, and the system has to be smart enough
-> to say no to her — not just stuff her in because there's a free seat.
+> overlap — but not exactly. Nusrat's headed toward Farmgate, which happens
+> to pass right through a junction at Mohakhali. Rafiq shows up wanting to
+> go from that same junction onward to Farmgate too — he can just be picked
+> up along the way. Then Shirin shows up wanting a totally different
+> direction off that same junction, and the system has to be smart enough to
+> say no to her — not just stuff her in because there's a free seat.
 >
-> So the real problem isn't routing. It's decision-making in real time:
-> who can actually share a ride, what's a fair price for each person
-> individually, and does the driver know exactly who's in his car and what
-> stage the trip's at. That's what I built around — three actors: Passenger,
-> Driver/Tesla, and the Pool that ties them together.
+> So the real problem isn't just "who's nearby." It's "whose route can
+> actually share one vehicle without backtracking," who's willing to share
+> with who, and does the driver know exactly who's in his car and what stage
+> the trip's at. Three actors: Passenger, Driver/Tesla, and the Pool that
+> ties them together.
 
 ---
 
-## 1:00 – 3:00 — How you engineered it (~290 words)
+## 1:00 – 3:00 — How you engineered it (~300 words)
 
 *[ON SCREEN: architecture diagram first, then ERD, then briefly scroll through the actual folder structure / a couple of key files]*
 
@@ -54,88 +57,105 @@ demonstrating things on screen.
 > On the database side, the two tables that matter most are `pools` and
 > `ride_requests`. A `ride_request` is one passenger's booking — their own
 > status, their own fare. A `pool` is one Tesla's actual trip, which can
-> carry multiple ride requests. I gave `ride_requests` a nullable `pool_id`
-> foreign key instead of a separate join table, because a request only ever
-> belongs to one pool — it doesn't switch vehicles mid-trip.
+> carry multiple ride requests.
 >
-> The one decision I'd defend hardest is how I handled the concurrency
-> problem — two passengers grabbing the last seat at the same instant. I
-> used one atomic SQL statement: update the seat count *and* check it fits
-> under capacity, in the same `UPDATE ... WHERE` — not a read, then a
-> check, then a write in application code. That closes the race window
-> completely, and I actually proved it — fired two simultaneous requests at
-> the same pool in an automated test, and got exactly one success, one
-> clean rejection, every time.
+> The decision I'd defend hardest is how matching actually works. My first
+> version tagged each zone with a flat area label and pooled anyone in the
+> same area — but that can't tell the difference between "genuinely on the
+> way" and "needs the driver to backtrack through a junction." So I modeled
+> the zones as a real road graph instead: each request gets its actual
+> shortest path computed, and two requests can only share a vehicle if their
+> paths merge into one continuous route, traveled the same direction. That
+> rule is what correctly rejects Shirin in a minute.
 >
-> The trade-off I'll own upfront: auth is a JWT stored in `localStorage`,
-> not an httpOnly cookie. That's fine for an MVP, but it's readable by any
-> JS on the page, so before this went anywhere near production I'd move to
-> cookies plus CSRF protection. I'd rather say that myself than have it
-> pointed out.
+> Consent works the same way I'd want it to work on me: when a driver wants
+> to add someone to a pool I'm already in, I get a say — not just the person
+> being added. Every existing member and the newcomer all have to agree; one
+> "no" and the newcomer is removed, seat freed, back to waiting.
+>
+> And the concurrency problem — two passengers grabbing the last seat at the
+> same instant — is one atomic SQL statement: update the seat count *and*
+> check it fits under capacity, in the same `UPDATE ... WHERE`, not a read,
+> then a check, then a write. I fired two simultaneous requests at the same
+> pool in an automated test and got exactly one success, one clean
+> rejection, every time.
+>
+> The trade-off I'll own upfront: auth is a JWT in `localStorage`, not an
+> httpOnly cookie. Fine for an MVP, but readable by any JS on the page — I'd
+> move to cookies plus CSRF before this went anywhere near production.
 
 ---
 
-## 3:00 – 6:00 — Product tour (~420 words)
+## 3:00 – 6:00 — Product tour (~440 words)
 
-*[ON SCREEN: live app — switch between the two browser windows as noted]*
+*[ON SCREEN: live app — switch between the three browser windows as noted]*
 
 > Let's walk through it as the story. I'm signed in as Nusrat.
 >
 > *[Passenger view — request a ride]*
 >
-> I request Banani to Mohakhali — one seat. The app shows me an estimated
-> fare right away, base fare plus distance, no pooling discount yet, because
-> I haven't been matched to anyone. Status says "waiting for a driver."
+> I request Banani to Farmgate — one seat. The app shows me an estimated
+> fare right away, base plus distance, with a note that pooling could take
+> up to 20% off. No discount locked in yet, because I haven't been matched.
 >
 > *[Switch to Jashim's driver window]*
 >
-> Now I'm Jashim. Bullet's online, and I can see Nusrat's request sitting
-> in the open list. I accept it — that starts a new pool. If Rafiq requests
-> right after, going to Gulshan 1, I can add him to that *same* pool,
-> because his destination is close enough to Nusrat's — same pickup zone,
-> compatible cluster.
+> Now I'm Jashim. Bullet's online, Nusrat's request is sitting in the open
+> list. I accept it — since nobody's in a pool yet, there's nobody to ask,
+> so she goes straight to matched. If Rafiq requests next, from Mohakhali to
+> Farmgate — that's a stop right on Nusrat's own route — I can add him to
+> that *same* pool.
 >
-> *[Trigger the edge case — try adding an incompatible request]*
+> *[Switch to Rafiq's window, then Nusrat's]*
 >
-> Here's the edge case worth showing: if Shirin requests a ride to somewhere
-> like Mirpur — a totally different part of the city — and I try to add her
-> to this same pool, the app rejects it. Route doesn't match. That's the
-> matching rule actually being enforced, not just decoration.
+> But adding him doesn't instantly match him. Rafiq has to agree to share.
+> And so does Nusrat — she's already in the pool, and she gets a say about
+> sharing with *this* specific person too. Watch: Rafiq confirms... but
+> he's still marked pending, because Nusrat hasn't answered yet. I flip to
+> her screen, she approves, and now he flips to matched. Either one of them
+> could have said no, and it would've bounced him back to an open request
+> instead.
+>
+> *[Trigger the edge case]*
+>
+> Here's the edge case worth showing. Shirin wants Banani to Bashundhara —
+> a completely different direction off the same junction Nusrat and Rafiq's
+> route passes through. If I try to add her to this pool, the app rejects
+> it outright. Not because of a zone tag — because her path genuinely can't
+> merge with theirs without the vehicle turning around.
 >
 > *[Back to passenger status]*
 >
-> Notice Nusrat's fare is still just an estimate at this point — no discount
-> applied yet. That's deliberate: the pool discount only finalizes once I,
-> as the driver, mark the trip started — because that's the first moment the
-> pool's final size is actually locked in. Nobody can join after I mark
-> arrival, so it's not fair to promise a discount before that's certain.
+> Notice the fares are still just estimates right now — no discount yet.
+> That only locks in once I, the driver, mark the trip started, because
+> that's the first moment the pool's membership is actually final.
 >
 > *[Driver view — arrive, start]*
 >
-> I mark driver arrived, then start the trip — and now if I flip back to
-> Nusrat and Rafiq's screens, their fares update to the final, discounted
-> amount. Same math, ready to check by hand: thirty taka base, fifteen taka
-> per kilometer, twenty percent off once they're pooled.
+> I mark arrived, then start — and now Nusrat and Rafiq's fares update to
+> the final numbers. Checkable by hand: thirty taka base each, fifteen taka
+> per kilometer over their own route distance, twenty percent off once
+> pooled.
 >
 > One thing I won't demo live because it's genuinely hard to time by
 > clicking — the actual last-seat race, two people grabbing the same seat
-> at once — but that's exactly the scenario the automated test suite covers,
-> and it passes consistently: one request wins, one gets a clean rejection,
-> capacity never goes over.
+> at once — but that's exactly what the automated test suite fires on
+> purpose, and it passes consistently: one wins, one gets a clean
+> rejection, capacity never goes over.
 >
 > *[Complete the trip]*
 >
-> And I complete the trip — status moves to completed for both passengers,
-> and a payment record gets created for each of them.
+> I complete the trip — both move to completed, and a payment record gets
+> created for each of them.
 >
 > *[If deployed, show the live URL here; if not:]*
 >
 > This isn't deployed to a public URL yet — it runs reproducibly via Docker
-> Compose, which is documented in the README along with why.
+> Compose, documented in the README along with why.
 
 ---
 
-**Total spoken word count: ~850 words** — at a deliberate, explaining pace
+**Total spoken word count: ~880 words** — at a deliberate, explaining pace
 (roughly 140–150 words/minute), that lands close to 6:00 including the
 on-screen switches. Time yourself once before the real take; trim the
 architecture section first if you're running long, since the product tour
