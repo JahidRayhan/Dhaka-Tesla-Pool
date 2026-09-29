@@ -26,6 +26,7 @@ export default function PassengerPage() {
   const [cancellingId, setCancellingId] = useState(null);
   const [confirmingId, setConfirmingId] = useState(null);
   const [decliningId, setDecliningId] = useState(null);
+  const [answeringConsentId, setAnsweringConsentId] = useState(null);
 
   useEffect(() => {
     if (!authLoading && !user) router.replace('/login');
@@ -108,6 +109,19 @@ export default function PassengerPage() {
       setLoadError(err instanceof ApiRequestError ? err.message : 'Could not confirm sharing that ride.');
     } finally {
       setConfirmingId(null);
+    }
+  }
+
+  async function answerConsent(consentId, approve) {
+    setAnsweringConsentId(consentId);
+    try {
+      if (approve) await api.approvePoolConsent(token, consentId);
+      else await api.rejectPoolConsent(token, consentId);
+      await loadRides();
+    } catch (err) {
+      setLoadError(err instanceof ApiRequestError ? err.message : 'Could not send your answer.');
+    } finally {
+      setAnsweringConsentId(null);
     }
   }
 
@@ -226,6 +240,9 @@ export default function PassengerPage() {
                   confirming={confirmingId === r.id}
                   onDecline={handleDecline}
                   declining={decliningId === r.id}
+                  onApproveConsent={(consentId) => answerConsent(consentId, true)}
+                  onRejectConsent={(consentId) => answerConsent(consentId, false)}
+                  answeringConsentId={answeringConsentId}
                 />
               ))}
             </ul>

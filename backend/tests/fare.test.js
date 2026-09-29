@@ -2,51 +2,54 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { computeBaseAndDistance, computePoolDiscount } = require('../src/services/fareService');
 
-// Same coordinates as seed/002_seed.sql — kept in sync deliberately so this
-// test documents (and pins) the numbers in DESIGN.md's worked example.
-const BANANI = { latitude: 23.7936, longitude: 90.4066 };
-const MOHAKHALI = { latitude: 23.7806, longitude: 90.4058 };
-const GULSHAN_1 = { latitude: 23.7809, longitude: 90.4161 };
+// Path distances are what routeService produces for these routes over the
+// seeded zone graph (sum of real edge distances along the shortest path) —
+// pinned here as plain numbers so fare arithmetic is tested on its own,
+// independent of routing. routing.test.js separately checks that the real
+// graph produces these distances.
+const BANANI_TO_MOHAKHALI_KM = 1.4478; // one edge
+const BANANI_TO_FARMGATE_KM = 4.4384; // Banani > Mohakhali > Farmgate
+const MOHAKHALI_TO_FARMGATE_KM = 2.9906; // one edge
 
-test('base fare is a flat 3000 paisa regardless of route', () => {
-  const { baseFarePaisa } = computeBaseAndDistance(BANANI, MOHAKHALI);
-  assert.equal(baseFarePaisa, 3000);
+test('base fare is a flat 3000 paisa per seat regardless of route', () => {
+  assert.equal(computeBaseAndDistance(BANANI_TO_MOHAKHALI_KM).baseFarePaisa, 3000);
+  assert.equal(computeBaseAndDistance(BANANI_TO_FARMGATE_KM).baseFarePaisa, 3000);
 });
 
 test('Banani -> Mohakhali distance charge matches the verified system output (2172 paisa)', () => {
-  const { distanceChargePaisa } = computeBaseAndDistance(BANANI, MOHAKHALI);
-  assert.equal(distanceChargePaisa, 2172);
+  assert.equal(computeBaseAndDistance(BANANI_TO_MOHAKHALI_KM).distanceChargePaisa, 2172);
 });
 
-test('Banani -> Gulshan 1 distance charge matches the verified system output (2567 paisa)', () => {
-  const { distanceChargePaisa } = computeBaseAndDistance(BANANI, GULSHAN_1);
-  assert.equal(distanceChargePaisa, 2567);
+test('Banani -> Farmgate (two hops) distance charge is 6658 paisa', () => {
+  assert.equal(computeBaseAndDistance(BANANI_TO_FARMGATE_KM).distanceChargePaisa, 6658);
+});
+
+test('Mohakhali -> Farmgate distance charge is 4486 paisa', () => {
+  assert.equal(computeBaseAndDistance(MOHAKHALI_TO_FARMGATE_KM).distanceChargePaisa, 4486);
 });
 
 test('a solo passenger (pool size 1) gets no pool discount', () => {
-  assert.equal(computePoolDiscount(2172, 1), 0);
+  assert.equal(computePoolDiscount(6658, 1), 0);
 });
 
 test('base fare and distance charge scale with seatsRequested (2 seats costs exactly double)', () => {
-  const oneSeat = computeBaseAndDistance(BANANI, MOHAKHALI, 1);
-  const twoSeats = computeBaseAndDistance(BANANI, MOHAKHALI, 2);
+  const oneSeat = computeBaseAndDistance(BANANI_TO_FARMGATE_KM, 1);
+  const twoSeats = computeBaseAndDistance(BANANI_TO_FARMGATE_KM, 2);
   assert.equal(twoSeats.baseFarePaisa, oneSeat.baseFarePaisa * 2);
   assert.equal(twoSeats.distanceChargePaisa, oneSeat.distanceChargePaisa * 2);
 });
 
 test('a pooled passenger gets exactly 20% off their own distance charge, rounded to the nearest paisa', () => {
-  assert.equal(computePoolDiscount(2172, 2), 434); // Nusrat
-  assert.equal(computePoolDiscount(2567, 2), 513); // Rafiq
+  assert.equal(computePoolDiscount(6658, 2), 1332); // Nusrat
+  assert.equal(computePoolDiscount(4486, 2), 897); // Rafiq
 });
 
 test('final fare = base + distance - discount (Nusrat and Rafiq, pooled)', () => {
-  const nusrat = computeBaseAndDistance(BANANI, MOHAKHALI);
-  const nusratDiscount = computePoolDiscount(nusrat.distanceChargePaisa, 2);
-  const nusratFinal = nusrat.baseFarePaisa + nusrat.distanceChargePaisa - nusratDiscount;
-  assert.equal(nusratFinal, 4738);
+  const nusrat = computeBaseAndDistance(BANANI_TO_FARMGATE_KM);
+  const nusratFinal = nusrat.baseFarePaisa + nusrat.distanceChargePaisa - computePoolDiscount(nusrat.distanceChargePaisa, 2);
+  assert.equal(nusratFinal, 8326); // ৳83.26
 
-  const rafiq = computeBaseAndDistance(BANANI, GULSHAN_1);
-  const rafiqDiscount = computePoolDiscount(rafiq.distanceChargePaisa, 2);
-  const rafiqFinal = rafiq.baseFarePaisa + rafiq.distanceChargePaisa - rafiqDiscount;
-  assert.equal(rafiqFinal, 5054);
+  const rafiq = computeBaseAndDistance(MOHAKHALI_TO_FARMGATE_KM);
+  const rafiqFinal = rafiq.baseFarePaisa + rafiq.distanceChargePaisa - computePoolDiscount(rafiq.distanceChargePaisa, 2);
+  assert.equal(rafiqFinal, 6589); // ৳65.89
 });

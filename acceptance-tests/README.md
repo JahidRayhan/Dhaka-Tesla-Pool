@@ -38,7 +38,7 @@ independently, in either order.
 | Pool: occupied seats never exceed capacity (incl. concurrency) | `backend/tests/lifecycle.test.js` | Yes |
 | Pool: each passenger gets an individual fare | `backend/tests/lifecycle.test.js` | Yes |
 | Pool: a Tesla runs one active pool at a time | `backend/tests/lifecycle.test.js` | Yes |
-| Section 4: matching rule (zone/cluster) | `backend/tests/lifecycle.test.js` | Yes |
+| Section 4: matching rule (route graph, junction-aware) | `backend/tests/routing.test.js`, `backend/tests/lifecycle.test.js` | Yes |
 | Section 5: fare model (base + distance − discount) | `backend/tests/fare.test.js` | Yes |
 | Section 5: payment record created on completion | `04-pool-detail-completion-and-payments.test.js` | **No — not exercised at all before this suite** |
 | Section 6: JWT auth — reject missing/invalid tokens | `01-auth.test.js` | No |

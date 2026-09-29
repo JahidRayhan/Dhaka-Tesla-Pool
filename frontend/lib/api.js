@@ -52,6 +52,12 @@ export const api = {
   confirmRideRequest: (token, id) => apiFetch(`/api/ride-requests/${id}/confirm`, { method: 'POST', token }),
   declineRideRequest: (token, id, reason) =>
     apiFetch(`/api/ride-requests/${id}/decline`, { method: 'POST', body: { reason }, token }),
+  // An existing pool member answering "OK to share with this newcomer?" —
+  // every party affected by a proposed join has to approve, and any one
+  // rejection removes the newcomer.
+  approvePoolConsent: (token, consentId) => apiFetch(`/api/pool-consents/${consentId}/approve`, { method: 'POST', token }),
+  rejectPoolConsent: (token, consentId, reason) =>
+    apiFetch(`/api/pool-consents/${consentId}/reject`, { method: 'POST', body: { reason }, token }),
   acceptRideRequest: (token, id, payload) =>
     apiFetch(`/api/ride-requests/${id}/accept`, { method: 'POST', body: payload, token }),
 
