@@ -9,6 +9,7 @@ const rideRequestRoutes = require('./routes/rideRequest.routes');
 const poolRoutes = require('./routes/pool.routes');
 const teslaRoutes = require('./routes/tesla.routes');
 const zoneRoutes = require('./routes/zone.routes');
+const consentRoutes = require('./routes/consent.routes');
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.use('/api/ride-requests', rideRequestRoutes);
 app.use('/api/pools', poolRoutes);
 app.use('/api/teslas', teslaRoutes);
 app.use('/api/zones', zoneRoutes);
+app.use('/api/pool-consents', consentRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
 app.use(errorHandler);
