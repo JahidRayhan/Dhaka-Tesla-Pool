@@ -36,7 +36,7 @@ export default function PoolPanel({ pool, onAdvance, advancing }) {
       </ul>
 
       {next && pool.status === 'MATCHED' && hasUnconfirmed && (
-        <p className="mb-2 text-sm text-amber">Waiting on a passenger to confirm sharing before you can arrive.</p>
+        <p className="mb-2 text-sm text-amber">A newcomer is waiting on the pool to agree to share — everyone in it has to say yes before you can arrive.</p>
       )}
       {next && (
         <button
