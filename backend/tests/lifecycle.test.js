@@ -42,6 +42,36 @@ function acceptRide(rideRequestId, body) {
     .send(body);
 }
 
+// The joiner confirming for themselves.
+function confirmAs(token, rideRequestId) {
+  return request(app).post(`/api/ride-requests/${rideRequestId}/confirm`).set('Authorization', `Bearer ${token}`);
+}
+
+// An existing member answering "are you OK sharing with this newcomer?".
+async function pendingConsentsOf(token) {
+  const res = await request(app).get('/api/ride-requests/mine').set('Authorization', `Bearer ${token}`);
+  return res.body.rideRequests.flatMap((r) => r.pendingConsents);
+}
+async function answerAll(token, verb) {
+  const pending = await pendingConsentsOf(token);
+  for (const c of pending) {
+    await request(app).post(`/api/pool-consents/${c.id}/${verb}`).set('Authorization', `Bearer ${token}`);
+  }
+  return pending.length;
+}
+const statusOf = async (token, id) =>
+  (await request(app).get(`/api/ride-requests/${id}`).set('Authorization', `Bearer ${token}`)).body.rideRequest;
+
+// Nusrat rides Banani -> Farmgate (via the Mohakhali junction) in a fresh pool;
+// returns the pool id and her request id.
+async function nusratStartsPool() {
+  const nusrat = await requestRide(tokens.nusrat, { destination: 'Farmgate' });
+  const accept = await acceptRide(nusrat.body.rideRequest.id, { teslaId });
+  return { poolId: accept.body.poolId, nusratId: nusrat.body.rideRequest.id };
+}
+// Rafiq is picked up ALONG THE WAY (at Mohakhali) and also heads to Farmgate.
+const rafiqRequests = () => requestRide(tokens.rafiq, { pickup: 'Mohakhali', destination: 'Farmgate' });
+
 test('passenger sees an estimated fare immediately, before any match (no discount yet)', async () => {
   const res = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
   assert.equal(res.status, 201);
@@ -55,120 +85,214 @@ test('a 2-seat request costs exactly double a 1-seat request on the same route',
   assert.equal(Number(twoSeats.body.rideRequest.final_fare_paisa), Number(oneSeat.body.rideRequest.final_fare_paisa) * 2);
 });
 
-test('pooled fares finalize with the 20% discount only once the trip STARTS, not at MATCHED', async () => {
-  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
-  const rafiqReq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
+test('pooled fares finalize with the 20% discount only once the trip STARTS, and only after ALL parties agree', async () => {
+  const { poolId, nusratId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  const rafiqId = rafiq.body.rideRequest.id;
 
-  const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
-  assert.equal(accept1.status, 200);
-  assert.equal(accept1.body.rideRequestStatus, 'MATCHED'); // first member — auto-consented
-  const poolId = accept1.body.poolId;
+  const join = await acceptRide(rafiqId, { teslaId, poolId });
+  assert.equal(join.status, 200);
+  assert.equal(join.body.rideRequestStatus, 'PENDING_CONFIRMATION');
 
-  const accept2 = await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId });
-  assert.equal(accept2.status, 200);
-  assert.equal(accept2.body.rideRequestStatus, 'PENDING_CONFIRMATION'); // joining an existing pool needs consent
+  // Rafiq agreeing is not enough — Nusrat, already in the pool, has a say too.
+  assert.equal((await confirmAs(tokens.rafiq, rafiqId)).status, 204);
+  const midway = await statusOf(tokens.rafiq, rafiqId);
+  assert.equal(midway.status, 'PENDING_CONFIRMATION');
+  assert.deepEqual(midway.waitingOn, ['Nusrat']);
+  assert.equal(midway.ownConsentPending, false);
 
-  // Rafiq must explicitly confirm before the driver can arrive.
-  const confirm = await request(app)
-    .post(`/api/ride-requests/${rafiqReq.body.rideRequest.id}/confirm`)
-    .set('Authorization', `Bearer ${tokens.rafiq}`);
-  assert.equal(confirm.status, 204);
+  // Nusrat sees who is being proposed, and where they're going.
+  const asked = await pendingConsentsOf(tokens.nusrat);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].joinerName, 'Rafiq');
+  assert.equal(asked[0].joinerDestination, 'Farmgate');
 
-  // Right after MATCHED: no discount applied yet — this is the bug caught
-  // and fixed earlier (see DESIGN.md's "Correction" note).
-  const beforeStart = await request(app)
-    .get(`/api/ride-requests/${nusratReq.body.rideRequest.id}`)
-    .set('Authorization', `Bearer ${tokens.nusrat}`);
-  assert.equal(beforeStart.body.rideRequest.pool_discount_paisa, '0');
+  assert.equal(await answerAll(tokens.nusrat, 'approve'), 1);
+  assert.equal((await statusOf(tokens.rafiq, rafiqId)).status, 'MATCHED');
+
+  // No discount yet — it only finalizes once the pool's membership is locked in.
+  assert.equal((await statusOf(tokens.nusrat, nusratId)).pool_discount_paisa, '0');
 
   await request(app).patch(`/api/pools/${poolId}/arrive`).set('Authorization', `Bearer ${tokens.jashim}`);
   await request(app).patch(`/api/pools/${poolId}/start`).set('Authorization', `Bearer ${tokens.jashim}`);
 
-  const nusratFinal = await request(app)
-    .get(`/api/ride-requests/${nusratReq.body.rideRequest.id}`)
-    .set('Authorization', `Bearer ${tokens.nusrat}`);
-  const rafiqFinal = await request(app)
-    .get(`/api/ride-requests/${rafiqReq.body.rideRequest.id}`)
-    .set('Authorization', `Bearer ${tokens.rafiq}`);
+  const nusratFinal = await statusOf(tokens.nusrat, nusratId);
+  const rafiqFinal = await statusOf(tokens.rafiq, rafiqId);
+  assert.equal(nusratFinal.final_fare_paisa, '8326'); // 3000 + 6658 - 1332
+  assert.equal(rafiqFinal.final_fare_paisa, '6589'); // 3000 + 4486 - 897
 
-  assert.equal(nusratFinal.body.rideRequest.final_fare_paisa, '4738');
-  assert.equal(rafiqFinal.body.rideRequest.final_fare_paisa, '5054');
-
-  // Each can see the other in their own poolmates list, but not fares.
-  assert.deepEqual(nusratFinal.body.rideRequest.poolmates, [{ name: 'Rafiq', destination: 'Gulshan 1' }]);
+  // Each can see the other, but never the other's fare.
+  assert.deepEqual(nusratFinal.poolmates, [{ name: 'Rafiq', destination: 'Farmgate' }]);
 });
 
-test('a driver cannot mark arrival while a passenger has not yet confirmed sharing the ride', async () => {
-  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
-  const rafiqReq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
+test('with two people already in the pool, a newcomer needs BOTH of them to agree, not just one', async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  await acceptRide(rafiq.body.rideRequest.id, { teslaId, poolId });
+  await confirmAs(tokens.rafiq, rafiq.body.rideRequest.id);
+  await answerAll(tokens.nusrat, 'approve');
 
-  const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
-  const poolId = accept1.body.poolId;
-  await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId }); // Rafiq never confirms
+  // Shirin's Banani -> Mohakhali is a stretch of the same road, same direction.
+  const shirin = await requestRide(tokens.shirin, { destination: 'Mohakhali' });
+  const shirinId = shirin.body.rideRequest.id;
+  assert.equal((await acceptRide(shirinId, { teslaId, poolId })).status, 200);
+
+  await confirmAs(tokens.shirin, shirinId);
+  await answerAll(tokens.nusrat, 'approve');
+  assert.equal((await statusOf(tokens.shirin, shirinId)).status, 'PENDING_CONFIRMATION'); // Rafiq hasn't answered
+
+  assert.equal(await answerAll(tokens.rafiq, 'approve'), 1);
+  assert.equal((await statusOf(tokens.shirin, shirinId)).status, 'MATCHED');
+});
+
+test('one existing member saying no is enough: the newcomer is removed and the seat freed', async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  const rafiqId = rafiq.body.rideRequest.id;
+  await acceptRide(rafiqId, { teslaId, poolId });
+  await confirmAs(tokens.rafiq, rafiqId); // the newcomer is happy...
+
+  assert.equal(await answerAll(tokens.nusrat, 'reject'), 1); // ...but Nusrat isn't
+
+  const after = await statusOf(tokens.rafiq, rafiqId);
+  assert.equal(after.status, 'REQUESTED');
+  assert.equal(after.pool_id, null);
+  const { rows } = await pool.query('SELECT seats_occupied FROM pools WHERE id = $1', [poolId]);
+  assert.equal(rows[0].seats_occupied, 1); // only Nusrat's seat remains
+
+  // The pool isn't left unresolved: the driver may propose someone else, or Rafiq again.
+  assert.equal((await acceptRide(rafiqId, { teslaId, poolId })).status, 200);
+});
+
+test('a newcomer can decline for themselves, freeing the seat and returning to REQUESTED', async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  const rafiqId = rafiq.body.rideRequest.id;
+  await acceptRide(rafiqId, { teslaId, poolId });
+
+  const decline = await request(app)
+    .post(`/api/ride-requests/${rafiqId}/decline`)
+    .set('Authorization', `Bearer ${tokens.rafiq}`);
+  assert.equal(decline.status, 204);
+
+  const after = await statusOf(tokens.rafiq, rafiqId);
+  assert.equal(after.status, 'REQUESTED');
+  assert.equal(after.pool_id, null);
+  // Nusrat is no longer being asked about someone who withdrew.
+  assert.equal((await pendingConsentsOf(tokens.nusrat)).length, 0);
+});
+
+test('a driver cannot mark arrival while a newcomer is still waiting on the pool to agree', async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  await acceptRide(rafiq.body.rideRequest.id, { teslaId, poolId }); // nobody answers
 
   const arrive = await request(app).patch(`/api/pools/${poolId}/arrive`).set('Authorization', `Bearer ${tokens.jashim}`);
   assert.equal(arrive.status, 409);
 });
 
-test('a passenger can decline joining a pool, freeing the seat and returning to REQUESTED', async () => {
-  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
-  const rafiqReq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
+test('the driver cannot propose a second newcomer while the first proposal is still unresolved', async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  await acceptRide(rafiq.body.rideRequest.id, { teslaId, poolId });
 
-  const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
-  const poolId = accept1.body.poolId;
-  await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId });
+  const shirin = await requestRide(tokens.shirin, { destination: 'Mohakhali' });
+  const second = await acceptRide(shirin.body.rideRequest.id, { teslaId, poolId });
+  assert.equal(second.status, 409);
+});
 
-  const decline = await request(app)
-    .post(`/api/ride-requests/${rafiqReq.body.rideRequest.id}/decline`)
-    .set('Authorization', `Bearer ${tokens.rafiq}`);
-  assert.equal(decline.status, 204);
+test('if the last member whose answer was outstanding cancels, the newcomer is not left stuck waiting', async () => {
+  const { poolId, nusratId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  const rafiqId = rafiq.body.rideRequest.id;
+  await acceptRide(rafiqId, { teslaId, poolId });
+  await confirmAs(tokens.rafiq, rafiqId); // only Nusrat's answer is outstanding
 
-  const rafiqAfter = await request(app)
-    .get(`/api/ride-requests/${rafiqReq.body.rideRequest.id}`)
-    .set('Authorization', `Bearer ${tokens.rafiq}`);
-  assert.equal(rafiqAfter.body.rideRequest.status, 'REQUESTED');
-  assert.equal(rafiqAfter.body.rideRequest.pool_id, null);
+  const cancel = await request(app)
+    .patch(`/api/ride-requests/${nusratId}/cancel`)
+    .set('Authorization', `Bearer ${tokens.nusrat}`);
+  assert.equal(cancel.status, 204);
 
-  const { rows } = await pool.query('SELECT seats_occupied FROM pools WHERE id = $1', [poolId]);
-  assert.equal(rows[0].seats_occupied, 1); // Rafiq's seat was freed, only Nusrat's remains
+  // Nusrat can never answer now, so Rafiq isn't held hostage to a reply that won't come.
+  assert.equal((await statusOf(tokens.rafiq, rafiqId)).status, 'MATCHED');
+});
 
-  // The driver can now accept Rafiq's (still-open) request again if they want.
-  const reaccept = await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId });
-  assert.equal(reaccept.status, 200);
+test('a newcomer who cancels while pending withdraws the question from everyone they were asking', async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  const rafiqId = rafiq.body.rideRequest.id;
+  await acceptRide(rafiqId, { teslaId, poolId });
+  assert.equal((await pendingConsentsOf(tokens.nusrat)).length, 1);
+
+  await request(app).patch(`/api/ride-requests/${rafiqId}/cancel`).set('Authorization', `Bearer ${tokens.rafiq}`);
+  assert.equal((await pendingConsentsOf(tokens.nusrat)).length, 0);
+});
+
+test("a passenger cannot answer a sharing question that was put to someone else", async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  await acceptRide(rafiq.body.rideRequest.id, { teslaId, poolId });
+  const [question] = await pendingConsentsOf(tokens.nusrat);
+
+  const res = await request(app)
+    .post(`/api/pool-consents/${question.id}/approve`)
+    .set('Authorization', `Bearer ${tokens.shirin}`);
+  assert.equal(res.status, 403);
+});
+
+test('a sharing question can only be answered once', async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  await acceptRide(rafiq.body.rideRequest.id, { teslaId, poolId });
+  const [question] = await pendingConsentsOf(tokens.nusrat);
+
+  const first = await request(app).post(`/api/pool-consents/${question.id}/approve`).set('Authorization', `Bearer ${tokens.nusrat}`);
+  const again = await request(app).post(`/api/pool-consents/${question.id}/reject`).set('Authorization', `Bearer ${tokens.nusrat}`);
+  assert.equal(first.status, 204);
+  assert.equal(again.status, 409); // can't retroactively veto after the fact
 });
 
 test('a passenger cannot confirm or decline a ride that is not awaiting confirmation', async () => {
   const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
-  // Still REQUESTED — never accepted into any pool.
-  const confirm = await request(app)
-    .post(`/api/ride-requests/${nusratReq.body.rideRequest.id}/confirm`)
-    .set('Authorization', `Bearer ${tokens.nusrat}`);
+  const confirm = await confirmAs(tokens.nusrat, nusratReq.body.rideRequest.id); // still REQUESTED
   assert.equal(confirm.status, 409);
 });
 
-test("a passenger cannot confirm or decline someone else's pending ride request", async () => {
-  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
-  const rafiqReq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
-  const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
-  const poolId = accept1.body.poolId;
-  await acceptRide(rafiqReq.body.rideRequest.id, { teslaId, poolId });
+test("a passenger cannot confirm someone else's pending ride request", async () => {
+  const { poolId } = await nusratStartsPool();
+  const rafiq = await rafiqRequests();
+  await acceptRide(rafiq.body.rideRequest.id, { teslaId, poolId });
 
-  const res = await request(app)
-    .post(`/api/ride-requests/${rafiqReq.body.rideRequest.id}/confirm`)
-    .set('Authorization', `Bearer ${tokens.nusrat}`); // Nusrat, not Rafiq
+  const res = await confirmAs(tokens.nusrat, rafiq.body.rideRequest.id); // Nusrat, not Rafiq
   assert.equal(res.status, 403);
 });
 
-test('matching rule rejects an incompatible route from joining an existing pool', async () => {
-  const nusratReq = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
-  const accept1 = await acceptRide(nusratReq.body.rideRequest.id, { teslaId });
-  const poolId = accept1.body.poolId;
+test('matching rule: two riders who start at the SAME zone but head to opposite sides of a junction cannot pool', async () => {
+  const nusrat = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
+  const poolId = (await acceptRide(nusrat.body.rideRequest.id, { teslaId })).body.poolId;
 
-  // Shirin -> Mirpur is a different cluster to Nusrat's Mohakhali trip.
-  const shirinReq = await requestRide(tokens.shirin, { destination: 'Mirpur' });
-  const rejected = await acceptRide(shirinReq.body.rideRequest.id, { teslaId, poolId });
-
+  // Banani -> Gulshan 1 leaves Banani the other way from Banani -> Mohakhali.
+  const rafiq = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
+  const rejected = await acceptRide(rafiq.body.rideRequest.id, { teslaId, poolId });
   assert.equal(rejected.status, 422);
+});
+
+test('matching rule: a trip onto a different branch of the junction cannot join a pool heading down another', async () => {
+  const { poolId } = await nusratStartsPool(); // Banani > Mohakhali > Farmgate
+
+  const shirin = await requestRide(tokens.shirin, { destination: 'Bashundhara' });
+  const rejected = await acceptRide(shirin.body.rideRequest.id, { teslaId, poolId });
+  assert.equal(rejected.status, 422);
+});
+
+test('matching rule: a trip further along the same road, in the same direction, is accepted', async () => {
+  const nusrat = await requestRide(tokens.nusrat, { destination: 'Mohakhali' });
+  const poolId = (await acceptRide(nusrat.body.rideRequest.id, { teslaId })).body.poolId;
+
+  // Mirpur lies straight on past Mohakhali — the vehicle just keeps going.
+  const shirin = await requestRide(tokens.shirin, { destination: 'Mirpur' });
+  const joined = await acceptRide(shirin.body.rideRequest.id, { teslaId, poolId });
+  assert.equal(joined.status, 200);
 });
 
 test("Bullet's capacity is never exceeded, including under concurrent accepts for the last seat", async () => {
@@ -280,8 +404,8 @@ test('a Tesla can only run one active pool at a time', async () => {
   const accept1 = await acceptRide(first.body.rideRequest.id, { teslaId });
   assert.equal(accept1.status, 200);
 
-  // Rafiq's request is route-compatible, but this driver tries to start a
-  // SECOND new pool on the same Tesla instead of joining the first one.
+  // This driver tries to start a SECOND new pool on the same Tesla instead
+  // of joining the first one — regardless of whether the routes would match.
   const second = await requestRide(tokens.rafiq, { destination: 'Gulshan 1' });
   const accept2 = await acceptRide(second.body.rideRequest.id, { teslaId }); // no poolId — attempts a new pool
   assert.equal(accept2.status, 409);
