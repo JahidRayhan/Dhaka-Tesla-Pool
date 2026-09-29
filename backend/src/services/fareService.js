@@ -1,5 +1,3 @@
-const { haversineKm } = require('../utils/haversine');
-
 // All amounts in paisa (1 taka = 100 paisa). See DESIGN.md Section 3 for the
 // worked-by-hand example these constants reproduce.
 const BASE_FARE_PAISA = 3000; // ৳30 flat
@@ -7,21 +5,20 @@ const RATE_PER_KM_PAISA = 1500; // ৳15/km
 const POOL_DISCOUNT_RATE = 0.2; // 20% off distanceCharge when pool size > 1
 
 /**
- * baseFare + distanceCharge for a single zone-to-zone trip, scaled by seat
+ * baseFare + distanceCharge for a trip of a given length, scaled by seat
  * count. A 2-seat booking occupies twice the capacity of a 1-seat booking on
  * the same route, so it should cost twice as much — this was a real bug
  * caught by hand-testing: seatsRequested was accepted by the API but never
  * actually reached the fare calculation, so a 1-seat and 2-seat booking on
  * an identical route billed identically.
+ *
+ * Takes a precomputed distanceKm rather than zone objects: HOW FAR a trip is
+ * belongs to routeService (the sum of real edge distances along the
+ * request's shortest path), and this function only decides what that
+ * distance costs. Keeping them separate means changing the routing model
+ * never requires touching fare arithmetic, and vice versa.
  */
-function computeBaseAndDistance(pickupZone, destinationZone, seatsRequested = 1) {
-  const distanceKm = haversineKm(
-    pickupZone.latitude,
-    pickupZone.longitude,
-    destinationZone.latitude,
-    destinationZone.longitude,
-  );
-
+function computeBaseAndDistance(distanceKm, seatsRequested = 1) {
   const baseFarePaisa = BASE_FARE_PAISA * seatsRequested;
   // Round the PER-SEAT distance charge first, then multiply by seat count —
   // not the other way around. Rounding the combined amount (rate * distance

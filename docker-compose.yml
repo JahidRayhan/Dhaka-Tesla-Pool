@@ -23,7 +23,9 @@ services:
       # own folders (both happen to have a "002_"), so the container-side
       # names are renumbered to guarantee migrations run before the seed.
       - ./migrations/002_add_pending_confirmation_status.sql:/docker-entrypoint-initdb.d/002_migration.sql:ro
-      - ./seed/002_seed.sql:/docker-entrypoint-initdb.d/003_seed.sql:ro
+      - ./migrations/003_add_zone_routing.sql:/docker-entrypoint-initdb.d/003_migration.sql:ro
+      - ./migrations/004_add_pool_join_consents.sql:/docker-entrypoint-initdb.d/004_migration.sql:ro
+      - ./seed/002_seed.sql:/docker-entrypoint-initdb.d/005_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tesla -d dhaka_tesla_pool"]
       interval: 5s

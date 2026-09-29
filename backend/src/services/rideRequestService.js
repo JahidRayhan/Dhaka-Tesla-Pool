@@ -1,6 +1,8 @@
 const { pool } = require('../config/db');
 const { ApiError } = require('../utils/ApiError');
 const { computeBaseAndDistance } = require('./fareService');
+const { shortestPath } = require('./routeService');
+const consentService = require('./consentService');
 const { logTransition } = require('./statusHistoryService');
 
 async function getZoneOrThrow(client, zoneId, label) {
@@ -21,18 +23,27 @@ async function createRequest(passengerId, { pickupZoneId, destinationZoneId, sea
   try {
     await client.query('BEGIN');
 
-    const pickupZone = await getZoneOrThrow(client, pickupZoneId, 'Pickup');
-    const destinationZone = await getZoneOrThrow(client, destinationZoneId, 'Destination');
+    await getZoneOrThrow(client, pickupZoneId, 'Pickup');
+    await getZoneOrThrow(client, destinationZoneId, 'Destination');
 
-    const { baseFarePaisa, distanceChargePaisa } = computeBaseAndDistance(pickupZone, destinationZone, seatsRequested);
+    // The trip's real path across the zone graph — not a single straight-line
+    // hop. Its distance drives the fare, and the path itself is stored so the
+    // pooling rule can later check whether it merges with other requests'
+    // paths into one non-branching vehicle route.
+    const route = await shortestPath(pickupZoneId, destinationZoneId, client);
+    if (!route) {
+      throw new ApiError(422, 'No route exists between those two zones');
+    }
+
+    const { baseFarePaisa, distanceChargePaisa } = computeBaseAndDistance(route.distanceKm, seatsRequested);
 
     const { rows } = await client.query(
       `INSERT INTO ride_requests
          (passenger_id, pickup_zone_id, destination_zone_id, seats_requested,
-          status, base_fare_paisa, distance_charge_paisa, pool_discount_paisa)
-       VALUES ($1, $2, $3, $4, 'REQUESTED', $5, $6, 0)
+          status, base_fare_paisa, distance_charge_paisa, pool_discount_paisa, route_zone_ids)
+       VALUES ($1, $2, $3, $4, 'REQUESTED', $5, $6, 0, $7::integer[])
        RETURNING *`,
-      [passengerId, pickupZoneId, destinationZoneId, seatsRequested, baseFarePaisa, distanceChargePaisa],
+      [passengerId, pickupZoneId, destinationZoneId, seatsRequested, baseFarePaisa, distanceChargePaisa, route.zoneIds],
     );
     const rideRequest = rows[0];
 
@@ -74,7 +85,7 @@ async function attachPoolmates(rows) {
      FROM ride_requests rr
      JOIN users u ON u.id = rr.passenger_id
      JOIN zones dz ON dz.id = rr.destination_zone_id
-     WHERE rr.pool_id = ANY($1::uuid[]) AND rr.status NOT IN ('CANCELLED')`,
+     WHERE rr.pool_id = ANY($1::uuid[]) AND rr.status NOT IN ('CANCELLED', 'PENDING_CONFIRMATION')`,
     [poolIds],
   );
 
@@ -88,6 +99,26 @@ async function attachPoolmates(rows) {
   }));
 }
 
+/**
+ * Adds what this passenger is currently being ASKED (pendingConsents — an
+ * existing member asked about a proposed newcomer) and, for a ride still
+ * awaiting agreement itself, who hasn't answered yet (waitingOn) and whether
+ * its own answer is still outstanding (ownConsentPending).
+ */
+async function attachConsentContext(rows) {
+  const { asked, waiting, ownPending } = await consentService.loadConsentContext(rows.map((r) => r.id));
+  return rows.map((r) => ({
+    ...r,
+    pendingConsents: asked.get(r.id) || [],
+    waitingOn: waiting.get(r.id) || [],
+    ownConsentPending: ownPending.has(r.id),
+  }));
+}
+
+async function enrich(rows) {
+  return attachConsentContext(await attachPoolmates(rows));
+}
+
 async function listMine(passengerId) {
   const { rows } = await pool.query(
     `SELECT rr.*, pz.name AS pickup_zone_name, dz.name AS destination_zone_name
@@ -98,7 +129,7 @@ async function listMine(passengerId) {
      ORDER BY rr.requested_at DESC`,
     [passengerId],
   );
-  return attachPoolmates(rows);
+  return enrich(rows);
 }
 
 async function getByIdForUser(id, user) {
@@ -118,7 +149,7 @@ async function getByIdForUser(id, user) {
   if (!isOwner && !isAssignedDriver) {
     throw new ApiError(403, "You can't view another user's ride");
   }
-  const [enriched] = await attachPoolmates([rideRequest]);
+  const [enriched] = await enrich([rideRequest]);
   return enriched;
 }
 
@@ -126,7 +157,7 @@ async function getByIdForUser(id, user) {
 async function listOpen() {
   const { rows } = await pool.query(
     `SELECT rr.*, u.name AS passenger_name,
-            pz.name AS pickup_zone_name, dz.name AS destination_zone_name, dz.cluster AS destination_cluster
+            pz.name AS pickup_zone_name, dz.name AS destination_zone_name
      FROM ride_requests rr
      JOIN users u ON u.id = rr.passenger_id
      JOIN zones pz ON pz.id = rr.pickup_zone_id
@@ -196,6 +227,10 @@ async function cancel(passengerId, id, reason) {
       changedBy: passengerId,
       note: reason,
     });
+
+    // Anyone still waiting on an answer from this passenger — or this
+    // passenger was themselves a pending newcomer — needs their proposal tidied.
+    await consentService.handleCancelledRequest(client, id, passengerId);
 
     await client.query('COMMIT');
   } catch (err) {
