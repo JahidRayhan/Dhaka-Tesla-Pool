@@ -15,28 +15,75 @@ function publicUser(user) {
   return rest;
 }
 
+const MIN_PASSWORD_LENGTH = 8;
+const MAX_PASSWORD_LENGTH = 72; // bcrypt silently ignores anything past 72 bytes
+// Deliberately loose: one @, something on each side, a dot in the domain, no
+// spaces. Real verification is a confirmation email, not a regex.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Emails are case-insensitive in practice; store and compare them lowercased
+// so "Nusrat@x.com" and "nusrat@x.com" can't become two accounts.
+const normalizeEmail = (email) => email.trim().toLowerCase();
+
 const signup = asyncHandler(async (req, res) => {
   const { name, email, phone, password, role } = req.body;
-  if (!name || !email || !password) {
+
+  if (typeof name !== 'string' || typeof email !== 'string' || typeof password !== 'string'
+      || !name.trim() || !email.trim() || !password) {
     throw new ApiError(422, 'name, email and password are required');
+  }
+  const cleanEmail = normalizeEmail(email);
+  if (!EMAIL_PATTERN.test(cleanEmail)) {
+    throw new ApiError(422, 'email is not a valid email address');
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    throw new ApiError(422, `password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+  }
+  if (Buffer.byteLength(password) > MAX_PASSWORD_LENGTH) {
+    throw new ApiError(422, `password must be at most ${MAX_PASSWORD_LENGTH} bytes`);
+  }
+  if (phone != null && typeof phone !== 'string') {
+    throw new ApiError(422, 'phone must be a string');
   }
   const validRole = ['passenger', 'driver', 'both'].includes(role) ? role : 'passenger';
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const { rows } = await pool.query(
-    `INSERT INTO users (name, email, phone, password_hash, role)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-    [name, email, phone || null, passwordHash, validRole],
-  );
-  const user = rows[0];
-  await pool.query('INSERT INTO wallets (user_id, balance_paisa) VALUES ($1, 0)', [user.id]);
+
+  // User + wallet are one unit: a user without a wallet would break every
+  // later payment path, so either both rows exist or neither does.
+  const client = await pool.connect();
+  let user;
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO users (name, email, phone, password_hash, role)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [name.trim(), cleanEmail, phone || null, passwordHash, validRole],
+    );
+    user = rows[0];
+    await client.query('INSERT INTO wallets (user_id, balance_paisa) VALUES ($1, 0)', [user.id]);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err; // a duplicate email surfaces as pg 23505 -> 409 via errorHandler
+  } finally {
+    client.release();
+  }
 
   res.status(201).json({ user: publicUser(user), token: issueToken(user) });
 });
 
 const login = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
-  const { rows } = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+
+  // Non-string input gets the same generic 401 as a wrong password; it must
+  // never reach bcrypt.compare, which throws on non-strings.
+  if (typeof email !== 'string' || typeof password !== 'string') {
+    throw new ApiError(401, 'Invalid email or password');
+  }
+
+  // lower(email) so accounts created before normalization still match.
+  const { rows } = await pool.query('SELECT * FROM users WHERE lower(email) = $1', [normalizeEmail(email)]);
   const user = rows[0];
 
   // Same generic error whether the email is unknown or the password is
