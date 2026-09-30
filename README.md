@@ -550,7 +550,6 @@ version of this answer).
 
 ## Known limitations
 
-- `docker compose up` has not been run end-to-end (see the note above).
 - No timeout if a passenger never responds to a pool-confirmation invitation
   — the driver just waits, with no automatic expiry or fallback. Would need
   a background job; named as a next improvement rather than built.
