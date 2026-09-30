@@ -4,6 +4,7 @@ const { computeBaseAndDistance } = require('./fareService');
 const { shortestPath } = require('./routeService');
 const consentService = require('./consentService');
 const { logTransition } = require('./statusHistoryService');
+const { cancelPoolIfEmpty } = require('./poolLifecycle');
 
 async function getZoneOrThrow(client, zoneId, label) {
   const { rows } = await client.query('SELECT * FROM zones WHERE id = $1', [zoneId]);
@@ -203,6 +204,10 @@ async function cancel(passengerId, id, reason) {
     }
 
     if (rideRequest.pool_id) {
+      // Lock the pool row first (same order as poolService.acceptRequest:
+      // ride_request, then pool) so a driver adding someone at the same
+      // moment can't interleave with the emptiness check further down.
+      await client.query('SELECT id FROM pools WHERE id = $1 FOR UPDATE', [rideRequest.pool_id]);
       // Free the seat(s) atomically — never just decrement in app code
       // without a WHERE guard, for the same reason capacity is never
       // incremented without one (see poolService.acceptRequest).
@@ -231,6 +236,10 @@ async function cancel(passengerId, id, reason) {
     // Anyone still waiting on an answer from this passenger — or this
     // passenger was themselves a pending newcomer — needs their proposal tidied.
     await consentService.handleCancelledRequest(client, id, passengerId);
+
+    // If that was the last live passenger, close the pool so the Tesla isn't
+    // stuck behind an empty one.
+    await cancelPoolIfEmpty(client, rideRequest.pool_id, passengerId);
 
     await client.query('COMMIT');
   } catch (err) {
