@@ -87,10 +87,34 @@ the system holds onto enough history to explain exactly what happened.
 
 ## Screenshots
 
-*Add screenshots or a short GIF here after running the app locally —*
-*`npm run dev` in `frontend/`, walk through the passenger and driver flows,*
-*and drop the images in this section. Not included in this draft since it*
-*was written without a live browser session.*
+The screens below use the seeded story cast (Nusrat, Rafiq, Shirin, Jashim and his Tesla, Bullet).
+
+**Passenger**
+
+![Landing page](docs/screenshots/01-landing.png)
+*Landing page with sign-in and account creation.*
+
+![Request a ride](docs/screenshots/02-passenger-request-form.png)
+*Nusrat picks a pickup zone, a drop-off zone and the number of seats.*
+
+![Waiting for a driver](docs/screenshots/03-passenger-waiting-estimate.png)
+*The request shows its status, seat count and an estimated fare (৳205.66 for 2 seats), with a note that pooling can take up to 20% off the distance charge. She can cancel while the request is still valid.*
+
+![Consent prompt](docs/screenshots/04-passenger-consent-prompt.png)
+*Rafiq is proposed as a pool-mate. Nusrat, already matched, is asked whether she agrees to share, and can say no and keep her ride as it is.*
+
+**Driver**
+
+![Pool waiting on consent](docs/screenshots/05-driver-pending-confirmation.png)
+*Jashim's view of Bullet: 3/3 seats are reserved, Rafiq is marked "Confirm sharing your ride", and "Mark driver arrived" is disabled until everyone in the pool has agreed.*
+
+![Trip on the way](docs/screenshots/06-driver-trip-on-the-way.png)
+*After the trip starts, the pool discount is applied: Nusrat's fare is ৳176.53 and Rafiq's ৳88.26. Open requests, such as Shirin's, are listed below.*
+
+**Edge case**
+
+![Route rejected](docs/screenshots/07-route-rejected.png)
+*Adding a request whose route would need backtracking through a junction is rejected with a clear message, and the pool stays as it was.*
 
 ## Architecture
 
@@ -599,45 +623,13 @@ MVP features are integrated, for integration fixes/docs/deployment checks;
 video. Commit messages follow `<type>(<scope>): <description>`
 (`feat`/`fix`/`refactor`/`test`/`docs`/`chore`/`build`).
 
-*This README was written before the git history was constructed — the*
-*actual branch/commit history in this repository is the source of truth for*
-*whether this was followed; if you're reading this before that step, the*
-*history doesn't exist yet.*
 
 ## AI usage
 
-Claude (Anthropic) was used throughout — for schema design, backend/frontend
-implementation, and test-writing — in a sandboxed environment with a real
-Postgres instance and Node runtime, so most claims below were actually run,
-not just generated.
+## AI usage
 
-**One accepted suggestion**: the atomic `UPDATE pools SET seats_occupied =
-seats_occupied + n WHERE seats_occupied + n <= capacity` pattern for the
-concurrency requirement (Section 14), instead of a read-then-write with an
-application-level check. Accepted as-is and verified by firing two
-concurrent `accept` requests at the same pool in an automated test — exactly
-one `200`, one `409`, capacity never exceeded.
+I used **Claude (Anthropic)** throughout this project. It produced the first version and the initial idea, including a draft schema, ride lifecycle and fare model, and wrote most of the backend, frontend and tests in a sandbox with a real Postgres and Node runtime. I ran everything locally with Docker, reviewed the result, and changed what I thought was wrong, sometimes fixing it myself and sometimes having Claude fix it. **Accepted suggestion:** enforcing seat capacity with a single atomic `UPDATE ... WHERE seats_occupied + n <= capacity` instead of reading and then checking in application code; the check and increment happen as one database operation, so two requests for the last seat cannot both succeed, and a concurrency test covers it. **Changed suggestion:** the first version could place a stranger in a pool without asking anyone, so the final version requires every current member and the newcomer to agree, and one decline returns the newcomer to `REQUESTED`, which added the `pool_join_consents` table. I also caught that the pool discount was locked at match time, which favoured whoever joined later, so it now locks when the trip starts, and that the Docker setup mounted migrations as folders that Postgres would not run, so each `.sql` file is now mounted individually. Claude wrote most of the code; I decided what was wrong and what to change, and I can explain the schema, state transitions, consent flow and concurrency handling.
 
-**Two rejected/changed suggestions, both caught by checking claims against
-real output rather than trusting them**:
-1. The fare-discount lock timing was first implemented as "lock at
-   `MATCHED` time." Checking that rule against its own worked example (would
-   Nusrat and Rafiq both actually get the discount?) showed it was wrong —
-   an early-matched passenger would get no discount while a later-joining
-   pool-mate on the same trip would. Changed to lock at `STARTED`, once pool
-   membership is provably final. Documented as a "Correction" in `DESIGN.md`
-   rather than silently fixed.
-2. `docker-compose.yml` initially mounted `./migrations` and `./seed` as
-   subfolders under Postgres's `docker-entrypoint-initdb.d`. Postgres's
-   init script only scans that directory one level deep — it doesn't
-   recurse — so this would have silently failed to apply the schema on
-   first run. Caught by reasoning through how the official Postgres image's
-   entrypoint script actually works, before ever running it; changed to
-   mount each `.sql` file individually.
-
-*(Personalize this section before submitting — the interview will expect*
-*you to speak to your own experience directing this work, not just repeat*
-*this list.)*
 
 ## Demo video
 

@@ -69,7 +69,7 @@ export default function SignupPage() {
             id="password"
             type="password"
             required
-            minLength={6}
+            minLength={8}
             value={form.password}
             onChange={update('password')}
             className="field-input"
