@@ -603,16 +603,11 @@ unjustified complexity at the current scale, per Section 9.
 
 ## Deployment
 
-**Not currently deployed.** Free-tier hosting for a stateful Postgres +
-Node API + Next.js frontend (three services) was out of scope to set up
-within this environment's constraints. Per Section 6's fallback: this
-README documents that constraint and provides a reproducible Docker
-deployment instead (`docker compose up --build`, above).
+The postgres database is hosted on Neon.
 
-If deploying to a free tier, reasonable options to evaluate: Render or
-Railway (API + Postgres together), Vercel (frontend only, pointing
-`NEXT_PUBLIC_API_URL` at the deployed API), or Fly.io (all three services).
-None of these have been tried against this specific project yet.
+The backend is deployed on Render. [Link](https://dhaka-tesla-pool-vkao.onrender.com)
+
+The fronends deployed on Netlify. [Link](https://dhakateslapool.netlify.app/)
 
 ## Git workflow
 
@@ -626,9 +621,13 @@ video. Commit messages follow `<type>(<scope>): <description>`
 
 ## AI usage
 
-I used **Claude (Anthropic)** throughout this project. It produced the first version and the initial idea, including a draft schema, ride lifecycle and fare model, and wrote most of the backend, frontend and tests in a sandbox with a real Postgres and Node runtime. I ran everything locally with Docker, reviewed the result, and changed what I thought was wrong, sometimes fixing it myself and sometimes having Claude fix it. **Accepted suggestion:** enforcing seat capacity with a single atomic `UPDATE ... WHERE seats_occupied + n <= capacity` instead of reading and then checking in application code; the check and increment happen as one database operation, so two requests for the last seat cannot both succeed, and a concurrency test covers it. **Changed suggestion:** the first version could place a stranger in a pool without asking anyone, so the final version requires every current member and the newcomer to agree, and one decline returns the newcomer to `REQUESTED`, which added the `pool_join_consents` table. I also caught that the pool discount was locked at match time, which favoured whoever joined later, so it now locks when the trip starts, and that the Docker setup mounted migrations as folders that Postgres would not run, so each `.sql` file is now mounted individually. Claude wrote most of the code; I decided what was wrong and what to change, and I can explain the schema, state transitions, consent flow and concurrency handling.
+I used **Claude (Anthropic)** as a building partner throughout this project. It produced the first version and the initial idea, including a draft schema, ride lifecycle and fare model, which i did refinements for improvements. Then wrote most of the backend, frontend and tests in a sandbox with a real Postgres and Node runtime. I ran everything locally with Docker, reviewed the result, and changed what I thought was wrong, sometimes fixing it myself and sometimes having Claude fix it. 
+
+**Accepted suggestion:** enforcing seat capacity with a single atomic `UPDATE ... WHERE seats_occupied + n <= capacity` instead of reading and then checking in application code; the check and increment happen as one database operation, so two requests for the last seat cannot both succeed, and a concurrency test covers it. 
+
+**Changed suggestion:** the first version could place a stranger in a pool without asking anyone, so the final version requires every current member and the newcomer to agree, and one decline returns the newcomer to `REQUESTED`, which added the `pool_join_consents` table. I also caught that the pool discount was locked at match time, which favoured whoever joined later, so it now locks when the trip starts, and that the Docker setup mounted migrations as folders that Postgres would not run, so each `.sql` file is now mounted individually. Claude wrote most of the code; I decided what was wrong and what to change, and I can explain the schema, state transitions, consent flow and concurrency handling.
 
 
 ## Demo video
 
-*Add your Loom (or similar) link here, max 6 minutes, per Section 13.*
+*[Video Link.](https://drive.google.com/file/d/1Bw4bqmF3EOXBEa0L2fF2P001xh6zWruc/view?usp=sharing)*
