@@ -1,4 +1,4 @@
-V# Dhaka Tesla Pool — Schema, Lifecycle, Routing & Fare Model
+# Dhaka Tesla Pool — Schema, Lifecycle, Routing & Fare Model
 
 Cast: **Jashim** (driver) owns **Bullet** (3-seat Tesla). **Nusrat** (Banani→Farmgate),
 **Rafiq** (Mohakhali→Farmgate — picked up along the way), **Shirin**
