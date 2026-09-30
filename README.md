@@ -599,10 +599,6 @@ MVP features are integrated, for integration fixes/docs/deployment checks;
 video. Commit messages follow `<type>(<scope>): <description>`
 (`feat`/`fix`/`refactor`/`test`/`docs`/`chore`/`build`).
 
-*This README was written before the git history was constructed — the*
-*actual branch/commit history in this repository is the source of truth for*
-*whether this was followed; if you're reading this before that step, the*
-*history doesn't exist yet.*
 
 ## AI usage
 
@@ -635,9 +631,7 @@ real output rather than trusting them**:
    entrypoint script actually works, before ever running it; changed to
    mount each `.sql` file individually.
 
-*(Personalize this section before submitting — the interview will expect*
-*you to speak to your own experience directing this work, not just repeat*
-*this list.)*
+<!-- TODO (author): add a short first-person paragraph here on what you directed, reviewed, and changed yourself. -->
 
 ## Demo video
 
