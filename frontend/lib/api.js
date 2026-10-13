@@ -39,6 +39,9 @@ export const api = {
 
   zones: () => apiFetch('/api/zones'),
 
+  wallet: (token) => apiFetch('/api/wallet', { token }),
+  topUpWallet: (token, amountPaisa) => apiFetch('/api/wallet/topup', { method: 'POST', body: { amountPaisa }, token }),
+
   myTeslas: (token) => apiFetch('/api/teslas/mine', { token }),
   createTesla: (token, payload) => apiFetch('/api/teslas', { method: 'POST', body: payload, token }),
   setTeslaActive: (token, id, isActive) =>
@@ -66,6 +69,7 @@ export const api = {
   arrivePool: (token, id) => apiFetch(`/api/pools/${id}/arrive`, { method: 'PATCH', token }),
   startPool: (token, id) => apiFetch(`/api/pools/${id}/start`, { method: 'PATCH', token }),
   completePool: (token, id) => apiFetch(`/api/pools/${id}/complete`, { method: 'PATCH', token }),
+  cancelPool: (token, id, reason) => apiFetch(`/api/pools/${id}/cancel`, { method: 'PATCH', body: { reason }, token }),
 };
 
 export { ApiRequestError };

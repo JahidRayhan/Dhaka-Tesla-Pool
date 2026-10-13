@@ -21,6 +21,7 @@ export default function DriverPage() {
   const [loadError, setLoadError] = useState(null);
   const [acceptingId, setAcceptingId] = useState(null);
   const [advancing, setAdvancing] = useState(false);
+  const [cancellingPool, setCancellingPool] = useState(false);
   const [actionError, setActionError] = useState(null);
 
   useEffect(() => {
@@ -104,6 +105,19 @@ export default function DriverPage() {
       setActionError(err instanceof ApiRequestError ? err.message : 'Could not accept that request.');
     } finally {
       setAcceptingId(null);
+    }
+  }
+
+  async function handleCancelPool(poolId) {
+    setCancellingPool(true);
+    setActionError(null);
+    try {
+      await api.cancelPool(token, poolId);
+      await loadBoard();
+    } catch (err) {
+      setActionError(err instanceof ApiRequestError ? err.message : 'Could not cancel the pool.');
+    } finally {
+      setCancellingPool(false);
     }
   }
 
@@ -204,7 +218,13 @@ export default function DriverPage() {
         {activePool && (
           <section className="mb-10">
             <h2 className="mb-4 font-display text-xl font-bold">Active pool</h2>
-            <PoolPanel pool={activePool} onAdvance={handleAdvance} advancing={advancing} />
+            <PoolPanel
+              pool={activePool}
+              onAdvance={handleAdvance}
+              advancing={advancing}
+              onCancel={handleCancelPool}
+              cancelling={cancellingPool}
+            />
           </section>
         )}
 

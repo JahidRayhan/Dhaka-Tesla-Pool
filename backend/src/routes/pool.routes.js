@@ -11,5 +11,6 @@ router.get('/:id', poolController.getById);
 router.patch('/:id/arrive', poolController.arrive);
 router.patch('/:id/start', poolController.start);
 router.patch('/:id/complete', poolController.complete);
+router.patch('/:id/cancel', poolController.cancel);
 
 module.exports = router;

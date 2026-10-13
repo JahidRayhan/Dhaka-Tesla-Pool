@@ -3,7 +3,7 @@ const { ApiError } = require('../utils/ApiError');
 // Postgres error codes we want to translate into clean 4xx responses
 // instead of leaking a raw 500 + SQL detail to the client.
 const PG_ERROR_MESSAGES = {
-  23505: 'A record with that value already exists.', // unique_violation
+  23505: 'A record with that value already exists.', // unique_violation (also: a Tesla can only run one active pool)
   23503: 'Referenced record does not exist.', // foreign_key_violation
   23514: 'That value violates a data constraint.', // check_violation
 };
@@ -29,6 +29,13 @@ function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-va
   if (err.expose && err.status >= 400 && err.status < 500) {
     const message = err.type === 'entity.parse.failed' ? 'Request body is not valid JSON' : err.message;
     return res.status(err.status).json({ error: message });
+  }
+
+  // Two requests changed the same rows at the same instant and Postgres chose
+  // one to abort (40P01 deadlock_detected / 40001 serialization_failure). Nothing
+  // was written, so retrying is safe — tell the client that instead of a 500.
+  if (err.code === '40P01' || err.code === '40001') {
+    return res.status(409).json({ error: 'Another change was happening at the same moment — please try again' });
   }
 
   if (PG_BAD_INPUT_CODES.has(err.code)) {

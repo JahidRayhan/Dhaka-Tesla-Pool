@@ -4,9 +4,14 @@ const { computePoolDiscount } = require('./fareService');
 const { logTransition } = require('./statusHistoryService');
 const { routesAreCompatible } = require('./routeService');
 const consentService = require('./consentService');
+const { settleRidePayment } = require('./walletService');
 
 async function assertOwnsActiveTesla(client, driverId, teslaId) {
-  const { rows } = await client.query('SELECT * FROM teslas WHERE id = $1', [teslaId]);
+  // FOR UPDATE serialises everything a driver does with one Tesla. Without it,
+  // two simultaneous accepts both saw "no active pool" (there was no row to
+  // lock) and both created one — one vehicle in two pools. Reproduced: 25 of 25
+  // concurrent rounds did exactly that before this lock.
+  const { rows } = await client.query('SELECT * FROM teslas WHERE id = $1 FOR UPDATE', [teslaId]);
   if (rows.length === 0) throw new ApiError(404, 'Tesla not found');
   const tesla = rows[0];
   if (tesla.driver_id !== driverId) throw new ApiError(403, "That Tesla isn't yours");
@@ -207,6 +212,7 @@ const declineJoin = (passengerId, requestId, reason) =>
   consentService.respondAsJoiner(passengerId, requestId, 'DECLINED', reason);
 
 async function listMineForDriver(driverId) {
+  await consentService.expireStaleProposals();
   const { rows } = await db.query(
     `SELECT p.*, t.name AS tesla_name, t.capacity
      FROM pools p
@@ -219,6 +225,7 @@ async function listMineForDriver(driverId) {
 }
 
 async function getPoolDetail(driverId, poolId) {
+  await consentService.expireStaleProposals();
   const { rows: poolRows } = await db.query(
     `SELECT p.*, t.driver_id, t.name AS tesla_name, t.capacity
      FROM pools p JOIN teslas t ON t.id = p.tesla_id
@@ -241,6 +248,8 @@ async function getPoolDetail(driverId, poolId) {
 }
 
 async function transitionPool(driverId, poolId, { fromStatus, toStatus, rrFromStatus, rrToStatus, timestampCol }) {
+  // An expired proposal must not keep blocking "mark arrived".
+  await consentService.expireStaleProposals();
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -297,16 +306,42 @@ async function transitionPool(driverId, poolId, { fromStatus, toStatus, rrFromSt
       }
     }
 
-    // On completion, drop a PENDING cash payment record per passenger —
-    // driver reconciles/collects it; TESLAPAY wallet debit would happen
-    // synchronously elsewhere instead of via this default.
+    // On completion, settle payment for every passenger in the pool.
+    //  - CASH: a PENDING payment record the driver collects and reconciles.
+    //  - TESLAPAY: move the fare wallet-to-wallet right here, in the same
+    //    transaction as the status change. If the passenger's balance fell
+    //    short since they requested, fall back to a pending cash payment —
+    //    the trip still completes, and the record shows how it really settled.
     if (toStatus === 'COMPLETED') {
-      for (const rr of affected) {
+      // Passengers in id order so concurrent completions lock wallet rows in a
+      // consistent order.
+      const { rows: toSettle } = await client.query(
+        `SELECT id, passenger_id, final_fare_paisa, payment_method
+         FROM ride_requests WHERE id = ANY($1::uuid[]) ORDER BY passenger_id`,
+        [affected.map((rr) => rr.id)],
+      );
+      for (const rr of toSettle) {
+        const amountPaisa = Number(rr.final_fare_paisa);
+        let method = 'CASH';
+        let status = 'PENDING';
+        if (rr.payment_method === 'TESLAPAY') {
+          const settled = await settleRidePayment(client, {
+            rideRequestId: rr.id,
+            passengerId: rr.passenger_id,
+            driverId,
+            amountPaisa,
+          });
+          if (settled) {
+            method = 'TESLAPAY';
+            status = 'PAID';
+          }
+        }
         await client.query(
-          `INSERT INTO payments (ride_request_id, amount_paisa, method, status)
-           SELECT id, final_fare_paisa, 'CASH', 'PENDING' FROM ride_requests WHERE id = $1
+          `INSERT INTO payments (ride_request_id, amount_paisa, method, status, paid_at)
+           VALUES ($1, $2, $3::payment_method, $4::payment_status,
+                   CASE WHEN $4::payment_status = 'PAID' THEN now() END)
            ON CONFLICT (ride_request_id) DO NOTHING`,
-          [rr.id],
+          [rr.id, amountPaisa, method, status],
         );
       }
     }
@@ -322,6 +357,117 @@ async function transitionPool(driverId, poolId, { fromStatus, toStatus, rrFromSt
     }
 
     await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+const MAX_CANCEL_REASON_LENGTH = 200;
+
+/**
+ * The driver cancels a pool that has not left yet (MATCHED or DRIVER_ARRIVED).
+ * Once the trip has STARTED passengers are in the vehicle, so it can only be
+ * completed.
+ *
+ * Passengers are not cancelled — the driver backing out is not their doing —
+ * they go back to REQUESTED with their seat released, so another driver (or
+ * the same one later) can pick them up. Any open sharing proposal is
+ * withdrawn with the pool. Every change is audited with the driver's reason.
+ */
+async function cancelPool(driverId, poolId, reason) {
+  if (reason != null && (typeof reason !== 'string' || reason.length > MAX_CANCEL_REASON_LENGTH)) {
+    throw new ApiError(422, `reason must be text of at most ${MAX_CANCEL_REASON_LENGTH} characters`);
+  }
+  const cleanReason = reason && reason.trim() ? reason.trim() : null;
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Ownership first, with no locks, so a stranger can never make us hold any.
+    const { rows: peek } = await client.query(
+      `SELECT t.driver_id FROM pools p JOIN teslas t ON t.id = p.tesla_id WHERE p.id = $1`,
+      [poolId],
+    );
+    if (peek.length === 0) throw new ApiError(404, 'Pool not found');
+    if (peek[0].driver_id !== driverId) throw new ApiError(403, "That pool isn't yours");
+
+    // LOCK ORDER matters. Every other flow that touches a ride and its pool
+    // (a passenger cancelling, a consent answer, accepting a request) locks the
+    // ride_request row(s) FIRST and the pool SECOND. Locking the pool first here
+    // made a passenger-cancel racing a driver-cancel deadlock (Postgres 40P01) —
+    // reproduced under a 40-round race test before this was changed.
+    const memberStatuses = `('PENDING_CONFIRMATION', 'MATCHED', 'DRIVER_ARRIVED')`;
+    const { rows: lockedMembers } = await client.query(
+      `SELECT id FROM ride_requests WHERE pool_id = $1 AND status IN ${memberStatuses} ORDER BY id FOR UPDATE`,
+      [poolId],
+    );
+    const { rows } = await client.query(
+      `SELECT p.*, t.driver_id FROM pools p JOIN teslas t ON t.id = p.tesla_id
+       WHERE p.id = $1 FOR UPDATE OF p`,
+      [poolId],
+    );
+    const target = rows[0];
+    if (!['MATCHED', 'DRIVER_ARRIVED'].includes(target.status)) {
+      throw new ApiError(409, `A pool that is '${target.status}' can no longer be cancelled`);
+    }
+
+    // Re-read the membership now that the pool is locked: if someone joined (or
+    // left) between the two locks above, we hold the wrong set — fail cleanly.
+    const { rows: members } = await client.query(
+      `SELECT id, status FROM ride_requests WHERE pool_id = $1 AND status IN ${memberStatuses} ORDER BY id`,
+      [poolId],
+    );
+    const lockedIds = new Set(lockedMembers.map((m) => m.id));
+    if (members.length !== lockedIds.size || members.some((m) => !lockedIds.has(m.id))) {
+      throw new ApiError(409, 'The pool changed while it was being cancelled — please try again');
+    }
+    const memberIds = members.map((m) => m.id);
+
+    // Withdraw every open question that involves these passengers.
+    await client.query(
+      `UPDATE pool_join_consents SET decision = 'VOID', decided_at = now()
+       WHERE decision = 'PENDING'
+         AND (joiner_request_id = ANY($1::uuid[]) OR member_request_id = ANY($1::uuid[]))`,
+      [memberIds],
+    );
+
+    await client.query(
+      `UPDATE ride_requests
+       SET status = 'REQUESTED', pool_id = NULL, matched_at = NULL, driver_arrived_at = NULL
+       WHERE id = ANY($1::uuid[])`,
+      [memberIds],
+    );
+    await client.query(
+      `UPDATE pools SET status = 'CANCELLED', cancelled_at = now(), seats_occupied = 0 WHERE id = $1`,
+      [poolId],
+    );
+
+    const note = cleanReason ? `driver cancelled the pool: ${cleanReason}` : 'driver cancelled the pool';
+    await logTransition(client, {
+      entityType: 'pool',
+      entityId: poolId,
+      fromStatus: target.status,
+      toStatus: 'CANCELLED',
+      changedBy: driverId,
+      note,
+    });
+    for (const m of members) {
+      await logTransition(client, {
+        entityType: 'ride_request',
+        entityId: m.id,
+        fromStatus: m.status,
+        toStatus: 'REQUESTED',
+        changedBy: driverId,
+        note: `${note} — back in the queue`,
+      });
+    }
+
+    await client.query('COMMIT');
+    return { releasedRequests: memberIds.length };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -366,4 +512,5 @@ module.exports = {
   markArrived,
   startTrip,
   completeTrip,
+  cancelPool,
 };

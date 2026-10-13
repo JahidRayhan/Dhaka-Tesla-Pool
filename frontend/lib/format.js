@@ -30,3 +30,13 @@ export const STATUS_TONE = {
 // would drift silently if the backend rate ever changed without updating
 // this too. Worth a shared-constants endpoint if that becomes a real risk.
 export const POOL_DISCOUNT_DISPLAY_PERCENT = 20;
+
+// "about 3 min left" for a sharing proposal that times out; null when there is
+// no deadline. Rounds up so "0 min left" is never shown while time remains.
+export function timeLeftLabel(expiresAt, now = Date.now()) {
+  if (!expiresAt) return null;
+  const ms = new Date(expiresAt).getTime() - now;
+  if (ms <= 0) return 'expiring now';
+  const minutes = Math.ceil(ms / 60000);
+  return `${minutes} min left`;
+}

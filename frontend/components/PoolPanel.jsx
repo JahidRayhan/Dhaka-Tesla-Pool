@@ -7,7 +7,9 @@ const NEXT_ACTION = {
   STARTED: { label: 'Complete trip', action: 'complete' },
 };
 
-export default function PoolPanel({ pool, onAdvance, advancing }) {
+const CANCELLABLE = new Set(['MATCHED', 'DRIVER_ARRIVED']);
+
+export default function PoolPanel({ pool, onAdvance, advancing, onCancel, cancelling }) {
   const next = NEXT_ACTION[pool.status];
   const hasUnconfirmed = pool.members.some((m) => m.status === 'PENDING_CONFIRMATION');
 
@@ -45,6 +47,19 @@ export default function PoolPanel({ pool, onAdvance, advancing }) {
           className="btn-primary w-full"
         >
           {advancing ? 'Updating…' : next.label}
+        </button>
+      )}
+      {onCancel && CANCELLABLE.has(pool.status) && (
+        <button
+          onClick={() => {
+            if (window.confirm('Cancel this pool? Everyone in it goes back to waiting for a driver.')) {
+              onCancel(pool.id);
+            }
+          }}
+          disabled={cancelling || advancing}
+          className="mt-3 w-full text-sm text-ink/50 underline decoration-line underline-offset-4 hover:text-rickshaw disabled:opacity-40"
+        >
+          {cancelling ? 'Cancelling…' : 'Cancel pool'}
         </button>
       )}
     </div>

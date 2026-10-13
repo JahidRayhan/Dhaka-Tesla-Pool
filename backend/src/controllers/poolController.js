@@ -53,4 +53,9 @@ const complete = asyncHandler(async (req, res) => {
   res.status(204).send();
 });
 
-module.exports = { accept, confirm, decline, approveConsent, rejectConsent, listMine, getById, arrive, start, complete };
+const cancel = asyncHandler(async (req, res) => {
+  await poolService.cancelPool(req.user.id, req.params.id, req.body?.reason);
+  res.status(204).send();
+});
+
+module.exports = { accept, confirm, decline, approveConsent, rejectConsent, listMine, getById, arrive, start, complete, cancel };

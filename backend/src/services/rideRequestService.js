@@ -3,8 +3,13 @@ const { ApiError } = require('../utils/ApiError');
 const { computeBaseAndDistance } = require('./fareService');
 const { shortestPath } = require('./routeService');
 const consentService = require('./consentService');
+const { balanceFor } = require('./walletService');
 const { logTransition } = require('./statusHistoryService');
 const { cancelPoolIfEmpty } = require('./poolLifecycle');
+
+// Matches the largest Tesla capacity a driver can register (teslaController: 1-6).
+// A bigger request could never be seated anywhere.
+const MAX_SEATS_PER_REQUEST = 6;
 
 async function getZoneOrThrow(client, zoneId, label) {
   const { rows } = await client.query('SELECT * FROM zones WHERE id = $1', [zoneId]);
@@ -12,12 +17,20 @@ async function getZoneOrThrow(client, zoneId, label) {
   return rows[0];
 }
 
-async function createRequest(passengerId, { pickupZoneId, destinationZoneId, seatsRequested = 1 }) {
+const PAYMENT_METHODS = ['CASH', 'TESLAPAY'];
+
+async function createRequest(passengerId, { pickupZoneId, destinationZoneId, seatsRequested = 1, paymentMethod = 'CASH' }) {
   if (pickupZoneId === destinationZoneId) {
     throw new ApiError(422, 'Pickup and destination zone must differ');
   }
   if (!Number.isInteger(seatsRequested) || seatsRequested < 1) {
     throw new ApiError(422, 'seatsRequested must be a positive integer');
+  }
+  if (!PAYMENT_METHODS.includes(paymentMethod)) {
+    throw new ApiError(422, `paymentMethod must be one of ${PAYMENT_METHODS.join(', ')}`);
+  }
+  if (seatsRequested > MAX_SEATS_PER_REQUEST) {
+    throw new ApiError(422, `seatsRequested cannot exceed ${MAX_SEATS_PER_REQUEST}`);
   }
 
   const client = await pool.connect();
@@ -38,13 +51,28 @@ async function createRequest(passengerId, { pickupZoneId, destinationZoneId, sea
 
     const { baseFarePaisa, distanceChargePaisa } = computeBaseAndDistance(route.distanceKm, seatsRequested);
 
+    // Choosing TeslaPay means the wallet should be able to cover the full
+    // undiscounted fare now; pooling can only make it cheaper. (The balance is
+    // checked again, atomically, when the trip completes.)
+    if (paymentMethod === 'TESLAPAY') {
+      const balance = await balanceFor(client, passengerId);
+      const estimate = baseFarePaisa + distanceChargePaisa;
+      if (balance < estimate) {
+        throw new ApiError(
+          422,
+          `Not enough TeslaPay balance: this ride costs up to ৳${(estimate / 100).toFixed(2)} but your wallet has ৳${(balance / 100).toFixed(2)}`,
+        );
+      }
+    }
+
     const { rows } = await client.query(
       `INSERT INTO ride_requests
          (passenger_id, pickup_zone_id, destination_zone_id, seats_requested,
-          status, base_fare_paisa, distance_charge_paisa, pool_discount_paisa, route_zone_ids)
-       VALUES ($1, $2, $3, $4, 'REQUESTED', $5, $6, 0, $7::integer[])
+          status, base_fare_paisa, distance_charge_paisa, pool_discount_paisa, route_zone_ids,
+          payment_method)
+       VALUES ($1, $2, $3, $4, 'REQUESTED', $5, $6, 0, $7::integer[], $8)
        RETURNING *`,
-      [passengerId, pickupZoneId, destinationZoneId, seatsRequested, baseFarePaisa, distanceChargePaisa, route.zoneIds],
+      [passengerId, pickupZoneId, destinationZoneId, seatsRequested, baseFarePaisa, distanceChargePaisa, route.zoneIds, paymentMethod],
     );
     const rideRequest = rows[0];
 
@@ -107,12 +135,14 @@ async function attachPoolmates(rows) {
  * its own answer is still outstanding (ownConsentPending).
  */
 async function attachConsentContext(rows) {
-  const { asked, waiting, ownPending } = await consentService.loadConsentContext(rows.map((r) => r.id));
+  const { asked, waiting, ownPending, expires } = await consentService.loadConsentContext(rows.map((r) => r.id));
   return rows.map((r) => ({
     ...r,
     pendingConsents: asked.get(r.id) || [],
     waitingOn: waiting.get(r.id) || [],
     ownConsentPending: ownPending.has(r.id),
+    // When the open sharing proposal for this ride times out (null if none).
+    consentExpiresAt: expires.get(r.id) || null,
   }));
 }
 
@@ -121,11 +151,14 @@ async function enrich(rows) {
 }
 
 async function listMine(passengerId) {
+  await consentService.expireStaleProposals();
   const { rows } = await pool.query(
-    `SELECT rr.*, pz.name AS pickup_zone_name, dz.name AS destination_zone_name
+    `SELECT rr.*, pz.name AS pickup_zone_name, dz.name AS destination_zone_name,
+            pay.method AS paid_with, pay.status AS payment_status
      FROM ride_requests rr
      JOIN zones pz ON pz.id = rr.pickup_zone_id
      JOIN zones dz ON dz.id = rr.destination_zone_id
+     LEFT JOIN payments pay ON pay.ride_request_id = rr.id
      WHERE rr.passenger_id = $1
      ORDER BY rr.requested_at DESC`,
     [passengerId],
@@ -134,6 +167,7 @@ async function listMine(passengerId) {
 }
 
 async function getByIdForUser(id, user) {
+  await consentService.expireStaleProposals();
   const { rows } = await pool.query(
     `SELECT rr.*, p.tesla_id, t.driver_id
      FROM ride_requests rr
@@ -155,7 +189,8 @@ async function getByIdForUser(id, user) {
 }
 
 /** Open requests a driver can consider accepting. MVP: no geospatial filter. */
-async function listOpen() {
+async function listOpen({ limit = 50, offset = 0 } = {}) {
+  await consentService.expireStaleProposals(); // expired joiners are open requests again
   const { rows } = await pool.query(
     `SELECT rr.*, u.name AS passenger_name,
             pz.name AS pickup_zone_name, dz.name AS destination_zone_name
@@ -164,7 +199,9 @@ async function listOpen() {
      JOIN zones pz ON pz.id = rr.pickup_zone_id
      JOIN zones dz ON dz.id = rr.destination_zone_id
      WHERE rr.status = 'REQUESTED'
-     ORDER BY rr.requested_at ASC`,
+     ORDER BY rr.requested_at ASC, rr.id ASC
+     LIMIT $1 OFFSET $2`,
+    [limit, offset],
   );
   return rows;
 }

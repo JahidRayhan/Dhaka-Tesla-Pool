@@ -6,6 +6,9 @@ import Header from '../../components/Header';
 import RideRequestCard from '../../components/RideRequestCard';
 import { useAuth } from '../../lib/AuthContext';
 import { api, ApiRequestError } from '../../lib/api';
+import { formatTaka } from '../../lib/format';
+
+const TOP_UP_PAISA = 50000; // ৳500 per tap — simulated money
 
 const ACTIVE_STATUSES = new Set(['REQUESTED', 'PENDING_CONFIRMATION', 'MATCHED', 'DRIVER_ARRIVED', 'STARTED']);
 
@@ -21,6 +24,9 @@ export default function PassengerPage() {
   const [pickupZoneId, setPickupZoneId] = useState('');
   const [destinationZoneId, setDestinationZoneId] = useState('');
   const [seats, setSeats] = useState(1);
+  const [paymentMethod, setPaymentMethod] = useState('CASH');
+  const [wallet, setWallet] = useState(null);
+  const [toppingUp, setToppingUp] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
@@ -32,18 +38,29 @@ export default function PassengerPage() {
     if (!authLoading && !user) router.replace('/login');
   }, [authLoading, user, router]);
 
+  // A failed balance fetch must never hide the rides, so it is best-effort.
+  const loadWallet = useCallback(async () => {
+    if (!token) return;
+    try {
+      setWallet(await api.wallet(token));
+    } catch {
+      // keep showing the last known balance
+    }
+  }, [token]);
+
   const loadRides = useCallback(async () => {
     if (!token) return;
     try {
       const data = await api.myRideRequests(token);
       setRides(data.rideRequests);
       setLoadError(null);
+      loadWallet(); // balance changes when a TeslaPay ride completes
     } catch (err) {
       setLoadError(err instanceof ApiRequestError ? err.message : 'Could not load your rides.');
     } finally {
       setLoadingRides(false);
     }
-  }, [token]);
+  }, [token, loadWallet]);
 
   useEffect(() => {
     if (!token) return;
@@ -79,12 +96,26 @@ export default function PassengerPage() {
         pickupZoneId: Number(pickupZoneId),
         destinationZoneId: Number(destinationZoneId),
         seatsRequested: seats,
+        paymentMethod,
       });
       await loadRides();
     } catch (err) {
       setFormError(err instanceof ApiRequestError ? err.message : 'Could not request a ride.');
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleTopUp() {
+    setToppingUp(true);
+    setFormError(null);
+    try {
+      await api.topUpWallet(token, TOP_UP_PAISA);
+      await loadWallet();
+    } catch (err) {
+      setFormError(err instanceof ApiRequestError ? err.message : 'Could not add money to your wallet.');
+    } finally {
+      setToppingUp(false);
     }
   }
 
@@ -203,6 +234,40 @@ export default function PassengerPage() {
                 >
                   +
                 </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="field-label">Pay with</label>
+              <div className="flex flex-wrap items-center gap-3">
+                {[
+                  ['CASH', 'Cash'],
+                  ['TESLAPAY', 'TeslaPay'],
+                ].map(([value, label]) => (
+                  <label key={value} className="flex cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="radio"
+                      name="paymentMethod"
+                      value={value}
+                      checked={paymentMethod === value}
+                      onChange={() => setPaymentMethod(value)}
+                    />
+                    {label}
+                  </label>
+                ))}
+                {wallet && (
+                  <span className="text-sm text-ink/60">
+                    Wallet {formatTaka(wallet.balancePaisa)}{' '}
+                    <button
+                      type="button"
+                      onClick={handleTopUp}
+                      disabled={toppingUp}
+                      className="underline decoration-line underline-offset-4 hover:text-rickshaw disabled:opacity-40"
+                    >
+                      {toppingUp ? 'Adding…' : `Add ${formatTaka(TOP_UP_PAISA)}`}
+                    </button>
+                  </span>
+                )}
               </div>
             </div>
 
