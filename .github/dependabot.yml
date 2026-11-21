@@ -1,0 +1,10 @@
+# Weekly pull requests for outdated dependencies and GitHub Actions, so security
+# fixes (like the Next.js advisory) arrive as a reviewable PR instead of being
+# noticed months later in a build log.
+version: 2
+updates:
+  - { package-ecosystem: npm, directory: /backend, schedule: { interval: weekly } }
+  - { package-ecosystem: npm, directory: /frontend, schedule: { interval: weekly } }
+  - { package-ecosystem: npm, directory: /mobile, schedule: { interval: weekly } }
+  - { package-ecosystem: npm, directory: /acceptance-tests, schedule: { interval: weekly } }
+  - { package-ecosystem: github-actions, directory: /, schedule: { interval: weekly } }

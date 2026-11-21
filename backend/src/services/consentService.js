@@ -1,7 +1,11 @@
 const crypto = require('crypto');
+const { commit } = require('../utils/tx');
+const { notifyAfterCommit } = require('./notificationService');
+const { retrying } = require('../utils/retryTx');
 const { pool: db } = require('../config/db');
 const { ApiError } = require('../utils/ApiError');
 const { logTransition } = require('./statusHistoryService');
+const { CONSENT_TIMEOUT_MINUTES } = require('../config/timeouts');
 
 /**
  * Opens a consent proposal for a joiner being added to a pool: one row per
@@ -12,12 +16,18 @@ const { logTransition } = require('./statusHistoryService');
  * Must run inside the caller's transaction — the invitation and the seat
  * reservation that accompanies it either both happen or neither does.
  */
-async function createProposal(client, joinerRequestId, existingMemberRequestIds) {
+async function createProposal(client, joinerRequestId, existingMemberRequestIds, preApprovedRequestIds = []) {
   const proposalId = crypto.randomUUID();
+  // A passenger who said up front "I'm fine sharing with up to N people" is
+  // recorded as already ACCEPTED for a proposal inside that limit, so they are
+  // never interrupted with a question they have already answered.
   await client.query(
-    `INSERT INTO pool_join_consents (proposal_id, joiner_request_id, member_request_id)
-     SELECT $1, $2, unnest($3::uuid[])`,
-    [proposalId, joinerRequestId, [...existingMemberRequestIds, joinerRequestId]],
+    `INSERT INTO pool_join_consents (proposal_id, joiner_request_id, member_request_id, decision, decided_at)
+     SELECT $1, $2, m,
+            (CASE WHEN m = ANY($4::uuid[]) THEN 'ACCEPTED' ELSE 'PENDING' END)::consent_decision,
+            CASE WHEN m = ANY($4::uuid[]) THEN now() END
+     FROM unnest($3::uuid[]) AS m`,
+    [proposalId, joinerRequestId, [...existingMemberRequestIds, joinerRequestId], preApprovedRequestIds],
   );
   return proposalId;
 }
@@ -36,6 +46,16 @@ async function createProposal(client, joinerRequestId, existingMemberRequestIds)
  * Caller must already hold a lock on the joiner's ride_request row so
  * simultaneous answers from different parties resolve one at a time.
  */
+/** The passengers already in the pool who were asked about this proposal (not the newcomer). */
+async function memberPassengerIds(client, proposalId) {
+  const { rows } = await client.query(
+    `SELECT DISTINCT rr.passenger_id FROM pool_join_consents c JOIN ride_requests rr ON rr.id = c.member_request_id
+     WHERE c.proposal_id = $1 AND c.member_request_id <> c.joiner_request_id`,
+    [proposalId],
+  );
+  return rows.map((r) => r.passenger_id);
+}
+
 async function resolveProposal(client, proposalId, changedBy, note) {
   const { rows } = await client.query(
     `SELECT joiner_request_id, decision FROM pool_join_consents WHERE proposal_id = $1`,
@@ -50,7 +70,8 @@ async function resolveProposal(client, proposalId, changedBy, note) {
   // Already resolved some other way (declined, cancelled, promoted) — nothing left to do.
   if (!joiner || joiner.status !== 'PENDING_CONFIRMATION') return 'NOTHING';
 
-  if (active.some((r) => r.decision === 'DECLINED')) {
+  // EXPIRED (nobody answered in time) is treated exactly like a decline.
+  if (active.some((r) => r.decision === 'DECLINED' || r.decision === 'EXPIRED')) {
     // Free the reserved seat atomically and hand the request back to the open pool.
     await client.query(`UPDATE pools SET seats_occupied = seats_occupied - $1 WHERE id = $2`, [
       joiner.seats_requested,
@@ -72,6 +93,12 @@ async function resolveProposal(client, proposalId, changedBy, note) {
       changedBy,
       note: note || 'someone in the pool declined the proposed sharing',
     });
+    const timedOut = active.some((r) => r.decision === 'EXPIRED');
+    if (timedOut) {
+      notifyAfterCommit(client, [joiner.passenger_id, ...(await memberPassengerIds(client, proposalId))], 'SHARE_EXPIRED', { rideRequestId: joinerRequestId });
+    } else {
+      notifyAfterCommit(client, [joiner.passenger_id], 'SHARE_REJECTED', { rideRequestId: joinerRequestId });
+    }
     return 'REJECTED';
   }
 
@@ -87,6 +114,7 @@ async function resolveProposal(client, proposalId, changedBy, note) {
       changedBy,
       note: 'everyone in the pool agreed to share',
     });
+    notifyAfterCommit(client, [joiner.passenger_id, ...(await memberPassengerIds(client, proposalId))], 'SHARE_ACCEPTED', { rideRequestId: joinerRequestId });
     return 'PROMOTED';
   }
 
@@ -119,7 +147,7 @@ async function applyDecision(client, consentId, passengerId, decision, note) {
     [consentId],
   );
   if (fresh[0].decision !== 'PENDING') {
-    throw new ApiError(409, 'This sharing decision has already been answered or is no longer needed');
+    throw new ApiError(409, 'This sharing decision has already been answered, timed out, or is no longer needed');
   }
 
   await client.query(`UPDATE pool_join_consents SET decision = $2, decided_at = now() WHERE id = $1`, [
@@ -131,11 +159,13 @@ async function applyDecision(client, consentId, passengerId, decision, note) {
 
 /** An existing member (or anyone with a pending decision) approves or rejects a proposed joiner. */
 async function respond(passengerId, consentId, decision, note) {
+  // A late answer to an expired proposal must find it already closed.
+  await expireStaleProposals();
   const client = await db.connect();
   try {
     await client.query('BEGIN');
     const outcome = await applyDecision(client, consentId, passengerId, decision, note);
-    await client.query('COMMIT');
+    await commit(client);
     return outcome;
   } catch (err) {
     await client.query('ROLLBACK');
@@ -151,6 +181,7 @@ async function respond(passengerId, consentId, decision, note) {
  * delegates to the same decision logic every other party uses.
  */
 async function respondAsJoiner(passengerId, requestId, decision, note) {
+  await expireStaleProposals();
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -173,7 +204,7 @@ async function respondAsJoiner(passengerId, requestId, decision, note) {
     }
 
     const outcome = await applyDecision(client, own[0].id, passengerId, decision, note);
-    await client.query('COMMIT');
+    await commit(client);
     return outcome;
   } catch (err) {
     await client.query('ROLLBACK');
@@ -181,6 +212,57 @@ async function respondAsJoiner(passengerId, requestId, decision, note) {
   } finally {
     client.release();
   }
+}
+
+/**
+ * Closes every proposal that has been open longer than the fixed timeout.
+ * Each one is handled in its own transaction under the joiner's row lock, so a
+ * last-second answer and the expiry cannot both win: whichever takes the lock
+ * first decides, and the other sees the proposal already resolved.
+ *
+ * Idempotent and safe to call from anywhere, any number of times. Returns how
+ * many joiners were sent back to the queue.
+ */
+async function expireStaleProposals() {
+  const { rows: stale } = await db.query(
+    `SELECT DISTINCT proposal_id, joiner_request_id
+     FROM pool_join_consents
+     WHERE decision = 'PENDING' AND created_at < now() - make_interval(mins => $1)`,
+    [CONSENT_TIMEOUT_MINUTES],
+  );
+
+  let rejected = 0;
+  for (const { proposal_id: proposalId, joiner_request_id: joinerId } of stale) {
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SELECT id FROM ride_requests WHERE id = $1 FOR UPDATE`, [joinerId]);
+      // Re-check under the lock: the proposal may have been answered or
+      // withdrawn while we were waiting for it.
+      const { rowCount } = await client.query(
+        `UPDATE pool_join_consents SET decision = 'EXPIRED', decided_at = now()
+         WHERE proposal_id = $1 AND decision = 'PENDING'
+           AND created_at < now() - make_interval(mins => $2)`,
+        [proposalId, CONSENT_TIMEOUT_MINUTES],
+      );
+      if (rowCount > 0) {
+        const outcome = await resolveProposal(
+          client,
+          proposalId,
+          null, // the system, not a person, made this change
+          `sharing proposal timed out after ${CONSENT_TIMEOUT_MINUTES} minutes without everyone agreeing`,
+        );
+        if (outcome === 'REJECTED') rejected += 1;
+      }
+      await commit(client);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+  return rejected;
 }
 
 /**
@@ -221,11 +303,13 @@ async function handleCancelledRequest(client, requestId, changedBy) {
  * and, for one still pending itself (as the JOINER), who hasn't answered yet.
  * Names and destinations only — never fares, which stay each passenger's own.
  */
+const expiryOf = (createdAt) => new Date(new Date(createdAt).getTime() + CONSENT_TIMEOUT_MINUTES * 60 * 1000);
+
 async function loadConsentContext(requestIds) {
-  if (requestIds.length === 0) return { asked: new Map(), waiting: new Map(), ownPending: new Set() };
+  if (requestIds.length === 0) return { asked: new Map(), waiting: new Map(), ownPending: new Set(), expires: new Map() };
 
   const { rows: askedRows } = await db.query(
-    `SELECT c.id, c.member_request_id, u.name AS joiner_name,
+    `SELECT c.id, c.member_request_id, c.created_at, u.name AS joiner_name,
             pz.name AS joiner_pickup, dz.name AS joiner_destination
      FROM pool_join_consents c
      JOIN ride_requests jr ON jr.id = c.joiner_request_id
@@ -239,7 +323,7 @@ async function loadConsentContext(requestIds) {
   );
 
   const { rows: waitingRows } = await db.query(
-    `SELECT c.joiner_request_id, u.name AS member_name
+    `SELECT c.joiner_request_id, c.created_at, u.name AS member_name
      FROM pool_join_consents c
      JOIN ride_requests mr ON mr.id = c.member_request_id
      JOIN users u ON u.id = mr.passenger_id
@@ -250,7 +334,7 @@ async function loadConsentContext(requestIds) {
   );
 
   const { rows: ownRows } = await db.query(
-    `SELECT joiner_request_id FROM pool_join_consents
+    `SELECT joiner_request_id, created_at FROM pool_join_consents
      WHERE joiner_request_id = ANY($1::uuid[])
        AND member_request_id = joiner_request_id AND decision = 'PENDING'`,
     [requestIds],
@@ -264,20 +348,34 @@ async function loadConsentContext(requestIds) {
       joinerName: r.joiner_name,
       joinerPickup: r.joiner_pickup,
       joinerDestination: r.joiner_destination,
+      expiresAt: expiryOf(r.created_at),
     });
+  }
+  // When each still-open proposal for a joiner runs out (the earliest wins).
+  const expires = new Map();
+  for (const r of [...waitingRows, ...ownRows]) {
+    const at = expiryOf(r.created_at);
+    if (!expires.has(r.joiner_request_id) || at < expires.get(r.joiner_request_id)) {
+      expires.set(r.joiner_request_id, at);
+    }
   }
   const waiting = new Map();
   for (const r of waitingRows) {
     if (!waiting.has(r.joiner_request_id)) waiting.set(r.joiner_request_id, []);
     waiting.get(r.joiner_request_id).push(r.member_name);
   }
-  return { asked, waiting, ownPending: new Set(ownRows.map((r) => r.joiner_request_id)) };
+  return { asked, waiting, ownPending: new Set(ownRows.map((r) => r.joiner_request_id)), expires };
 }
 
-module.exports = {
+module.exports = retrying(
+  {
   createProposal,
+  resolveProposal,
   respond,
   respondAsJoiner,
   handleCancelledRequest,
+  expireStaleProposals,
   loadConsentContext,
-};
+  },
+  ['respond', 'respondAsJoiner'],
+);

@@ -1,4 +1,5 @@
 'use client';
+import { homeFor } from '../../lib/format';
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -23,7 +24,7 @@ export default function SignupPage() {
     setSubmitting(true);
     try {
       const user = await signup(form);
-      router.push(user.role === 'driver' ? '/driver' : '/passenger');
+      router.push(homeFor(user));
     } catch (err) {
       setError(err instanceof ApiRequestError ? err.message : 'Something went wrong. Try again.');
     } finally {
