@@ -1,0 +1,31 @@
+name: Nightly database backup
+
+# Needs one repository secret: BACKUP_DATABASE_URL (a read-only connection string
+# to the PRODUCTION database). The dump is stored as a workflow artifact for 14
+# days. For anything beyond a small project, ALSO copy backups to storage you
+# control (S3/Backblaze with encryption) — and rehearse a restore with
+# backend/scripts/restore-check.sh, because an untested backup is only a hope.
+on:
+  schedule:
+    - cron: '30 21 * * *'   # 03:30 in Dhaka (UTC+6)
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install a pg_dump that matches the server major version
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc >/dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-16
+      - name: Dump
+        env:
+          DATABASE_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+        run: ./backend/scripts/backup.sh ./backups
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-backup
+          path: backups/
+          retention-days: 14

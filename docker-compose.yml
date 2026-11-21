@@ -10,25 +10,9 @@ services:
       - "5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
-      # Postgres's official image runs every .sql file directly inside this
-      # directory, in filename order, ONLY on first init (empty data dir) —
-      # it does NOT recurse into subfolders, so each file is bind-mounted
-      # individually to keep migrations/ and seed/ as separate folders in
-      # the repo while still flattening correctly for Docker. That's also
-      # why this is plain numbered SQL rather than a migration tool for the
-      # MVP — see README "Tech Choices" for the trade-off.
-      - ./migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
-      # Mount target filenames control execution order here, not the source
-      # filenames — migrations/ and seed/ number independently within their
-      # own folders (both happen to have a "002_"), so the container-side
-      # names are renumbered to guarantee migrations run before the seed.
-      - ./migrations/002_add_pending_confirmation_status.sql:/docker-entrypoint-initdb.d/002_migration.sql:ro
-      - ./migrations/003_add_zone_routing.sql:/docker-entrypoint-initdb.d/003_migration.sql:ro
-      - ./migrations/004_add_pool_join_consents.sql:/docker-entrypoint-initdb.d/004_migration.sql:ro
-      - ./migrations/005_add_teslapay_wallet_flow.sql:/docker-entrypoint-initdb.d/005_migration.sql:ro
-      - ./migrations/006_add_consent_expiry.sql:/docker-entrypoint-initdb.d/006_migration.sql:ro
-      - ./migrations/007_one_active_pool_per_tesla.sql:/docker-entrypoint-initdb.d/007_migration.sql:ro
-      - ./seed/002_seed.sql:/docker-entrypoint-initdb.d/008_seed.sql:ro
+      # No init scripts here any more: the API runs the tracked migration
+      # runner (backend/scripts/migrate.js) on start, so the same mechanism
+      # works on a fresh laptop, in CI and on Render.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tesla -d dhaka_tesla_pool"]
       interval: 5s
@@ -46,7 +30,13 @@ services:
       PORT: 4000
       DATABASE_URL: postgresql://tesla:tesla@db:5432/dhaka_tesla_pool
       JWT_SECRET: change_me_dev_only
-      JWT_EXPIRES_IN: 7d
+      JWT_EXPIRES_IN: 15m
+      # Local convenience only. A real deployment sets RUN_MIGRATIONS=true and
+      # SEED_REFERENCE=true but NEVER SEED_DEMO (public password, free money).
+      RUN_MIGRATIONS: "true"
+      SEED_REFERENCE: "true"
+      SEED_DEMO: "true"
+      SIMULATED_PAYMENTS: "true"
     ports:
       - "4000:4000"
     healthcheck:
