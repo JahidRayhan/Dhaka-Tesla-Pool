@@ -1,6 +1,7 @@
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { colors, STATUS_COLOR } from '../lib/theme';
-import { STATUS_LABEL, STATUS_TONE } from '../lib/format';
+import { STATUS_TONE } from '../lib/format';
+import { useI18n } from '../lib/LanguageContext';
 
 export function Button({ title, onPress, variant = 'primary', disabled, loading, style }) {
   const primary = variant === 'primary';
@@ -73,10 +74,48 @@ export function Chip({ label, selected, onPress }) {
 }
 
 export function StatusBadge({ status }) {
+  const { t } = useI18n();
   const color = STATUS_COLOR[STATUS_TONE[status]] || colors.muted;
+  const label = t(`s_${status}`);
   return (
     <View style={[styles.badge, { borderColor: color + '66', backgroundColor: color + '12' }]}>
-      <Text style={{ color, fontSize: 12, fontWeight: '600' }}>{STATUS_LABEL[status] || status}</Text>
+      <Text style={{ color, fontSize: 12, fontWeight: '600' }}>{label === `s_${status}` ? status : label}</Text>
+    </View>
+  );
+}
+
+/** A small coloured label, e.g. a verification state or "fits your pool". */
+export function Tag({ text, tone = 'muted' }) {
+  const color = tone === 'good' ? colors.transit : tone === 'warn' ? colors.amber : tone === 'bad' ? colors.rickshawDark : colors.muted;
+  return (
+    <View style={[styles.badge, { borderColor: color + '66', backgroundColor: color + '12' }]}>
+      <Text style={{ color, fontSize: 12, fontWeight: '600' }}>{text}</Text>
+    </View>
+  );
+}
+
+/** Tappable 1-5 stars. */
+export function Stars({ value, onChange, size = 30 }) {
+  return (
+    <View style={{ flexDirection: 'row', gap: 4 }}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <Pressable key={n} onPress={() => onChange?.(n)} disabled={!onChange} hitSlop={6} accessibilityRole="button" accessibilityLabel={`${n}`}>
+          <Text style={{ fontSize: size, color: n <= value ? colors.amber : colors.line }}>★</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+/** A labelled on/off row with optional help text underneath. */
+export function ToggleRow({ label, help, value, onValueChange, disabled }) {
+  return (
+    <View style={{ marginTop: 10 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Text style={{ color: colors.ink, fontSize: 15, flex: 1, paddingRight: 12 }}>{label}</Text>
+        <Switch value={value} onValueChange={onValueChange} disabled={disabled} trackColor={{ true: colors.rickshaw, false: colors.line }} />
+      </View>
+      {help ? <Text style={{ color: colors.muted, fontSize: 12, marginTop: 2 }}>{help}</Text> : null}
     </View>
   );
 }

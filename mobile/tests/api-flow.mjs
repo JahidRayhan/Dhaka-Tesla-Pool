@@ -66,3 +66,63 @@ ok('rejectPoolConsent endpoint reachable (404 for unknown id)', rejectErr?.statu
 // error handling
 let net; try { await api.me('bad'); } catch (e) { net = e; }
 ok('bad token -> ApiRequestError 401', net?.status === 401);
+
+// ---------------------------------------------------------------------------
+// The newer features, through the same client the screens use.
+// ---------------------------------------------------------------------------
+const prof = await api.updateProfile(n.token, { locale: 'bn', gender: 'female', name: 'Nusrat' });
+ok('updateProfile (language + gender)', prof.user.locale === 'bn' && prof.user.gender === 'female');
+await api.updateProfile(n.token, { locale: 'en' });
+
+const receipt = (await api.receipt(n.token, nr.id)).receipt;
+ok('receipt for the completed TeslaPay ride', receipt.kind === 'FARE' && receipt.fare.totalPaisa > 0 && receipt.payment.method === 'TESLAPAY');
+await api.rateRide(n.token, nr.id, 5, 'Smooth ride');
+let rateErr; try { await api.rateRide(n.token, nr.id, 1); } catch (e) { rateErr = e; }
+ok('rating works once, then 409', rateErr?.status === 409);
+ok('the app can tell the ride was rated', (await api.myRideRequests(n.token)).rideRequests.find((x) => x.id === nr.id).rated === true);
+
+const earnings = (await api.earnings(j.token)).totals;
+ok('driver earnings include the completed ride', earnings.ridesCompleted >= 1 && earnings.grossPaisa > 0);
+ok('driver profile readable (demo driver is verified)', (await api.driverProfile(j.token)).profile?.status === 'VERIFIED');
+
+const inbox = await api.notifications(n.token);
+ok('inbox has notifications and an unread count', inbox.notifications.length > 0 && inbox.unreadCount > 0);
+await api.markNotificationsRead(n.token, 'all');
+ok('mark all read', (await api.notifications(n.token, true)).unreadCount === 0);
+await api.registerPushToken(n.token, 'ExponentPushToken[flow-test-0000000]', 'android');
+await api.removePushToken(n.token, 'ExponentPushToken[flow-test-0000000]');
+ok('push token register + remove', true);
+
+const points = (await api.meetingPoints(banani)).meetingPoints;
+ok('meeting points for a zone', points.length >= 1);
+
+const live = (await api.createRideRequest(n.token, { pickupZoneId: banani, destinationZoneId: moha, shareMax: 3, pickupPointId: points[0].id })).rideRequest;
+const liveAcc = await api.acceptRideRequest(j.token, live.id, { teslaId: tesla.id });
+await api.sendLocation(j.token, liveAcc.poolId, 23.7936, 90.4066);
+const tripCard = (await api.myRideRequests(n.token)).rideRequests.find((x) => x.id === live.id);
+ok('passenger sees driver, vehicle, position and ETA', tripCard.trip?.driverName === 'Jashim' && !!tripCard.trip.location && tripCard.pickup_point_name);
+
+const share = await api.createShare(n.token, live.id);
+const pub = await fetch(`${process.env.EXPO_PUBLIC_API_URL.replace(/\/+$/, '')}/api/v1/trips/${share.token}`).then((r) => r.json());
+ok('the public follow-my-trip link works with no account and hides identifiers', pub.trip?.passengerFirstName === 'Nusrat' && !JSON.stringify(pub).includes('@'));
+await api.revokeShare(n.token, live.id);
+const dead = await fetch(`${process.env.EXPO_PUBLIC_API_URL.replace(/\/+$/, '')}/api/v1/trips/${share.token}`);
+ok('a revoked link stops working', dead.status === 404);
+
+const board = (await api.openRideRequests(j.token, liveAcc.poolId)).rideRequests;
+ok('the driver board accepts ?poolId= and annotates fit', Array.isArray(board));
+
+const rec = (await api.createRecurringRide(n.token, { pickupZoneId: banani, destinationZoneId: moha, daysOfWeek: [1, 2, 3], timeOfDay: '08:30' })).recurringRide;
+ok('recurring ride created', rec.time_of_day === '08:30');
+ok('recurring ride listed', (await api.recurringRides(n.token)).recurringRides.some((x) => x.id === rec.id));
+await api.setRecurringActive(n.token, rec.id, false);
+await api.deleteRecurringRide(n.token, rec.id);
+ok('recurring ride toggled and deleted', (await api.recurringRides(n.token)).recurringRides.every((x) => x.id !== rec.id));
+
+// Refresh-token rotation, as the clients do it.
+const fresh = await api.login({ email: 'rafiq@dhakateslapool.test', password: 'password123' });
+const rotated = await api.refresh(fresh.refreshToken);
+ok('refresh rotates both tokens', rotated.refreshToken && rotated.refreshToken !== fresh.refreshToken && !!rotated.accessToken);
+await api.logout(rotated.refreshToken);
+let afterLogout; try { await api.refresh(rotated.refreshToken); } catch (e) { afterLogout = e; }
+ok('a logged-out refresh token is dead', afterLogout?.status === 401);

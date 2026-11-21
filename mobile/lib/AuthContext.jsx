@@ -1,9 +1,10 @@
 import * as SecureStore from 'expo-secure-store';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Platform } from 'react-native';
-import { api, ApiRequestError } from './api';
+import { api, ApiRequestError, setSession, clearSession } from './api';
 
 const KEY = 'dtp_token';
+const REFRESH_KEY = 'dtp_refresh';
 
 // The JWT goes in the OS keychain/keystore (SecureStore), never AsyncStorage.
 // SecureStore has no web implementation, so the web build falls back to
@@ -11,14 +12,14 @@ const KEY = 'dtp_token';
 const storage =
   Platform.OS === 'web'
     ? {
-        get: async () => window.localStorage.getItem(KEY),
-        set: async (v) => window.localStorage.setItem(KEY, v),
-        del: async () => window.localStorage.removeItem(KEY),
+        get: async (k) => window.localStorage.getItem(k),
+        set: async (k, v) => window.localStorage.setItem(k, v),
+        del: async (k) => window.localStorage.removeItem(k),
       }
     : {
-        get: () => SecureStore.getItemAsync(KEY),
-        set: (v) => SecureStore.setItemAsync(KEY, v),
-        del: () => SecureStore.deleteItemAsync(KEY),
+        get: (k) => SecureStore.getItemAsync(k),
+        set: (k, v) => SecureStore.setItemAsync(k, v),
+        del: (k) => SecureStore.deleteItemAsync(k),
       };
 
 const AuthContext = createContext(null);
@@ -28,20 +29,38 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const forget = useCallback(async () => {
+    await Promise.all([storage.del(KEY), storage.del(REFRESH_KEY)]);
+    clearSession();
+    setToken(null);
+    setUser(null);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
+    // The API helper refreshes tokens silently; keep the keychain and React state
+    // in step with it, and sign out only if the refresh token itself is invalid.
+    setSession({
+      onChange: async ({ accessToken, refreshToken }) => {
+        await storage.set(KEY, accessToken);
+        await storage.set(REFRESH_KEY, refreshToken);
+        if (!cancelled) setToken(accessToken);
+      },
+      onExpired: () => forget(),
+    });
     (async () => {
       try {
-        const stored = await storage.get();
-        if (!stored) return;
-        const data = await api.me(stored);
+        const [access, refresh] = await Promise.all([storage.get(KEY), storage.get(REFRESH_KEY)]);
+        if (!access && !refresh) return;
+        setSession({ accessToken: access, refreshToken: refresh });
+        const data = await api.me(access || '');
         if (cancelled) return;
-        setToken(stored);
+        setToken((await storage.get(KEY)) || access);
         setUser(data.user);
       } catch (err) {
-        // An expired/invalid token is dropped; a network failure keeps it, so
-        // being offline at launch doesn't sign anyone out.
-        if (err instanceof ApiRequestError && err.status === 401) await storage.del();
+        // A dead session is dropped; a network failure keeps the tokens, so being
+        // offline at launch doesn't sign anyone out.
+        if (err instanceof ApiRequestError && err.status === 401) await forget();
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -49,11 +68,14 @@ export function AuthProvider({ children }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [forget]);
 
   const applySession = useCallback(async (data) => {
-    await storage.set(data.token);
-    setToken(data.token);
+    const access = data.accessToken || data.token;
+    await storage.set(KEY, access);
+    await storage.set(REFRESH_KEY, data.refreshToken);
+    setSession({ accessToken: access, refreshToken: data.refreshToken });
+    setToken(access);
     setUser(data.user);
     return data.user;
   }, []);
@@ -62,12 +84,12 @@ export function AuthProvider({ children }) {
   const signup = useCallback(async (payload) => applySession(await api.signup(payload)), [applySession]);
 
   const logout = useCallback(async () => {
-    await storage.del();
-    setToken(null);
-    setUser(null);
-  }, []);
+    const refresh = await storage.get(REFRESH_KEY);
+    if (refresh) api.logout(refresh).catch(() => {}); // revoke it server-side, best effort
+    await forget();
+  }, [forget]);
 
-  const value = useMemo(() => ({ token, user, loading, login, signup, logout }), [token, user, loading, login, signup, logout]);
+  const value = useMemo(() => ({ token, user, setUser, loading, login, signup, logout }), [token, user, loading, login, signup, logout]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
