@@ -14,6 +14,11 @@ export default function Header() {
         </Link>
         {user && (
           <div className="flex items-center gap-4 text-sm">
+            {user.role === 'admin' && (
+              <Link href="/admin" className="text-ink/70 underline decoration-line underline-offset-4 hover:text-ink">
+                Admin
+              </Link>
+            )}
             <span className="text-ink/70">{user.name}</span>
             <button onClick={logout} className="text-ink/70 underline decoration-line underline-offset-4 hover:text-ink">
               Sign out

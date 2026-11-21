@@ -1,0 +1,1791 @@
+# THE API CONTRACT. tests/openapi.test.js fails if a route exists that is not described here, or this
+# describes a route that no longer exists, so this file cannot silently drift from the code.
+openapi: 3.0.3
+info:
+  title: Dhaka Tesla Pool API
+  version: 1.0.0
+  description: 'Share a seat. Split the fare. Survive Dhaka traffic.
+
+
+    Base path /api/v1 (the older unversioned /api prefix still works but is deprecated). Authenticated calls send `Authorization:
+    Bearer <accessToken>`; access tokens last 15 minutes and are renewed with /auth/refresh. POSTs that move money or state
+    accept an `Idempotency-Key` header so a retry never repeats the action. Amounts are integer paisa (100 paisa = BDT 1).'
+servers:
+- url: http://localhost:4000
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        requestId:
+          type: string
+      required:
+      - error
+    SignupInput:
+      type: object
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+        phone:
+          type: string
+        role:
+          type: string
+          enum:
+          - passenger
+          - driver
+          - both
+      required:
+      - name
+      - email
+      - password
+    LoginInput:
+      type: object
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+      required:
+      - email
+      - password
+    ProfileInput:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        gender:
+          type: string
+          enum:
+          - female
+          - male
+          - other
+          nullable: true
+        locale:
+          type: string
+          enum:
+          - en
+          - bn
+    RefreshInput:
+      type: object
+      properties:
+        refreshToken:
+          type: string
+      required:
+      - refreshToken
+    PhoneInput:
+      type: object
+      properties:
+        phone:
+          type: string
+          description: Bangladeshi local (017...) or international (+8801...) form
+    CodeInput:
+      type: object
+      properties:
+        code:
+          type: string
+          pattern: ^[0-9]{6}$
+      required:
+      - code
+    ResetInput:
+      type: object
+      properties:
+        phone:
+          type: string
+        code:
+          type: string
+          pattern: ^[0-9]{6}$
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 72
+      required:
+      - phone
+      - code
+      - newPassword
+    RideRequestInput:
+      type: object
+      properties:
+        pickupZoneId:
+          type: integer
+        destinationZoneId:
+          type: integer
+        seatsRequested:
+          type: integer
+          minimum: 1
+          maximum: 6
+        paymentMethod:
+          type: string
+          enum:
+          - CASH
+          - TESLAPAY
+        shareMax:
+          type: integer
+          minimum: 2
+          maximum: 6
+          nullable: true
+          description: Pre-approve sharing with up to N people in total (including you); omit to be asked each time
+        womenOnly:
+          type: boolean
+          description: Requires gender=female on the profile
+        pickupPointId:
+          type: integer
+          nullable: true
+          description: A meeting point inside the pickup zone
+        scheduledFor:
+          type: string
+          format: date-time
+          nullable: true
+          description: 5 minutes to 30 days ahead; hidden from drivers until shortly before
+        maxWaitMinutes:
+          type: integer
+          minimum: 5
+          maximum: 240
+          nullable: true
+          description: Cancel automatically if no pool is found in time (default 60)
+      required:
+      - pickupZoneId
+      - destinationZoneId
+    AcceptInput:
+      type: object
+      properties:
+        teslaId:
+          type: string
+          format: uuid
+        poolId:
+          type: string
+          format: uuid
+          description: Join this existing pool instead of starting a new one
+      required:
+      - teslaId
+    ReasonInput:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 200
+    LocationInput:
+      type: object
+      properties:
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+      required:
+      - latitude
+      - longitude
+    NoShowInput:
+      type: object
+      properties:
+        requestId:
+          type: string
+          format: uuid
+      required:
+      - requestId
+    TeslaInput:
+      type: object
+      properties:
+        name:
+          type: string
+        capacity:
+          type: integer
+          minimum: 1
+          maximum: 6
+      required:
+      - name
+      - capacity
+    ActiveInput:
+      type: object
+      properties:
+        isActive:
+          type: boolean
+        active:
+          type: boolean
+    TopUpInput:
+      type: object
+      properties:
+        amountPaisa:
+          type: integer
+          minimum: 100
+          maximum: 1000000
+      required:
+      - amountPaisa
+    RatingInput:
+      type: object
+      properties:
+        stars:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: string
+          maxLength: 500
+      required:
+      - stars
+    DriverProfileInput:
+      type: object
+      properties:
+        licenseNumber:
+          type: string
+          minLength: 3
+          maxLength: 40
+        vehiclePlate:
+          type: string
+          minLength: 3
+          maxLength: 20
+      required:
+      - licenseNumber
+      - vehiclePlate
+    RecurringInput:
+      type: object
+      properties:
+        pickupZoneId:
+          type: integer
+        destinationZoneId:
+          type: integer
+        daysOfWeek:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 7
+          description: 'ISO weekdays: 1 = Monday ... 7 = Sunday'
+        timeOfDay:
+          type: string
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+          description: Local Dhaka time
+        seatsRequested:
+          type: integer
+        paymentMethod:
+          type: string
+          enum:
+          - CASH
+          - TESLAPAY
+        maxWaitMinutes:
+          type: integer
+          nullable: true
+        shareMax:
+          type: integer
+          nullable: true
+        womenOnly:
+          type: boolean
+      required:
+      - pickupZoneId
+      - destinationZoneId
+      - daysOfWeek
+      - timeOfDay
+    ReadInput:
+      type: object
+      properties:
+        ids:
+          oneOf:
+          - type: string
+            enum:
+            - all
+          - type: array
+            items:
+              type: string
+              format: uuid
+            maxItems: 100
+      required:
+      - ids
+    PushTokenInput:
+      type: object
+      properties:
+        token:
+          type: string
+        platform:
+          type: string
+          enum:
+          - android
+          - ios
+          - web
+      required:
+      - token
+      - platform
+    PushTokenRemoveInput:
+      type: object
+      properties:
+        token:
+          type: string
+      required:
+      - token
+    ReviewInput:
+      type: object
+      properties:
+        note:
+          type: string
+          maxLength: 300
+paths:
+  /health:
+    get:
+      tags:
+      - System
+      summary: Liveness plus a real database query
+      operationId: get_health
+      security: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /ready:
+    get:
+      tags:
+      - System
+      summary: 'Readiness: the schema is in place'
+      operationId: get_ready
+      security: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/signup:
+    post:
+      tags:
+      - Auth
+      summary: Create an account and start a session
+      operationId: post_api_v1_auth_signup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupInput'
+      responses:
+        '201':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/login:
+    post:
+      tags:
+      - Auth
+      summary: Sign in (failed attempts are throttled)
+      operationId: post_api_v1_auth_login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginInput'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/me:
+    get:
+      tags:
+      - Auth
+      summary: The signed-in user
+      operationId: get_api_v1_auth_me
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/profile:
+    patch:
+      tags:
+      - Auth
+      summary: Update name, gender (for women-only pooling) or language
+      operationId: patch_api_v1_auth_profile
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileInput'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/refresh:
+    post:
+      tags:
+      - Auth
+      summary: Swap a refresh token for a new access + refresh token (rotation)
+      operationId: post_api_v1_auth_refresh
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshInput'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/logout:
+    post:
+      tags:
+      - Auth
+      summary: Revoke this device's session
+      operationId: post_api_v1_auth_logout
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/logout-all:
+    post:
+      tags:
+      - Auth
+      summary: Revoke every session of the signed-in user
+      operationId: post_api_v1_auth_logout_all
+      security:
+      - bearerAuth: []
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/phone/request-otp:
+    post:
+      tags:
+      - Auth
+      summary: Text a verification code to the user's phone
+      operationId: post_api_v1_auth_phone_request_otp
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PhoneInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/phone/verify-otp:
+    post:
+      tags:
+      - Auth
+      summary: Confirm the phone with the 6-digit code
+      operationId: post_api_v1_auth_phone_verify_otp
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CodeInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/forgot-password:
+    post:
+      tags:
+      - Auth
+      summary: 'Text a reset code (always 204: never reveals whether the number exists)'
+      operationId: post_api_v1_auth_forgot_password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PhoneInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/auth/reset-password:
+    post:
+      tags:
+      - Auth
+      summary: Set a new password with the texted code; signs out every device
+      operationId: post_api_v1_auth_reset_password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests:
+    post:
+      tags:
+      - Rides
+      summary: Request a ride (supports Idempotency-Key)
+      operationId: post_api_v1_ride_requests
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RideRequestInput'
+      responses:
+        '201':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/mine:
+    get:
+      tags:
+      - Rides
+      summary: My rides, with trip details, poolmates and open sharing questions
+      operationId: get_api_v1_ride_requests_mine
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/open:
+    get:
+      tags:
+      - Rides
+      summary: The driver board; add ?poolId= to mark which requests fit that pool
+      operationId: get_api_v1_ride_requests_open
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/{id}/receipt:
+    get:
+      tags:
+      - Rides
+      summary: Fare breakdown for a completed ride (or a no-show fee)
+      operationId: get_api_v1_ride_requests_id_receipt
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/{id}/rating:
+    post:
+      tags:
+      - Rides
+      summary: Rate the other side of a completed ride, once
+      operationId: post_api_v1_ride_requests_id_rating
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RatingInput'
+      responses:
+        '201':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/{id}/share:
+    post:
+      tags:
+      - Rides
+      summary: Create a public follow-my-trip link
+      operationId: post_api_v1_ride_requests_id_share
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '201':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+      - Rides
+      summary: Revoke the trip link
+      operationId: delete_api_v1_ride_requests_id_share
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/{id}:
+    get:
+      tags:
+      - Rides
+      summary: One ride (passenger or its driver)
+      operationId: get_api_v1_ride_requests_id
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/{id}/cancel:
+    patch:
+      tags:
+      - Rides
+      summary: Cancel while allowed
+      operationId: patch_api_v1_ride_requests_id_cancel
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/{id}/accept:
+    post:
+      tags:
+      - Rides
+      summary: Accept into a new pool, or an existing one with poolId (supports Idempotency-Key)
+      operationId: post_api_v1_ride_requests_id_accept
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptInput'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/{id}/confirm:
+    post:
+      tags:
+      - Rides
+      summary: Newcomer agrees to share
+      operationId: post_api_v1_ride_requests_id_confirm
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/ride-requests/{id}/decline:
+    post:
+      tags:
+      - Rides
+      summary: Newcomer declines sharing (back to waiting)
+      operationId: post_api_v1_ride_requests_id_decline
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pool-consents/{id}/approve:
+    post:
+      tags:
+      - Pooling
+      summary: An existing member agrees to a newcomer
+      operationId: post_api_v1_pool_consents_id_approve
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pool-consents/{id}/reject:
+    post:
+      tags:
+      - Pooling
+      summary: An existing member refuses a newcomer
+      operationId: post_api_v1_pool_consents_id_reject
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pools/mine:
+    get:
+      tags:
+      - Pools
+      summary: My live pool
+      operationId: get_api_v1_pools_mine
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pools/{id}:
+    get:
+      tags:
+      - Pools
+      summary: Pool detail with each member's own fare
+      operationId: get_api_v1_pools_id
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pools/{id}/arrive:
+    patch:
+      tags:
+      - Pools
+      summary: Mark arrived (blocked while a sharing question is open)
+      operationId: patch_api_v1_pools_id_arrive
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pools/{id}/start:
+    patch:
+      tags:
+      - Pools
+      summary: Start the trip; the pool discount is fixed here
+      operationId: patch_api_v1_pools_id_start
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pools/{id}/complete:
+    patch:
+      tags:
+      - Pools
+      summary: Complete the trip; payments settle here
+      operationId: patch_api_v1_pools_id_complete
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pools/{id}/cancel:
+    patch:
+      tags:
+      - Pools
+      summary: Cancel before the trip starts; passengers return to the queue
+      operationId: patch_api_v1_pools_id_cancel
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReasonInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pools/{id}/location:
+    post:
+      tags:
+      - Pools
+      summary: Report the vehicle's position
+      operationId: post_api_v1_pools_id_location
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LocationInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/pools/{id}/no-show:
+    post:
+      tags:
+      - Pools
+      summary: Release a passenger who never came, after the waiting period
+      operationId: post_api_v1_pools_id_no_show
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NoShowInput'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/teslas:
+    post:
+      tags:
+      - Teslas
+      summary: Register a Tesla
+      operationId: post_api_v1_teslas
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TeslaInput'
+      responses:
+        '201':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/teslas/mine:
+    get:
+      tags:
+      - Teslas
+      summary: My Teslas
+      operationId: get_api_v1_teslas_mine
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/teslas/{id}/active:
+    patch:
+      tags:
+      - Teslas
+      summary: Go online / offline (verification may be required)
+      operationId: patch_api_v1_teslas_id_active
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActiveInput'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/zones:
+    get:
+      tags:
+      - Zones
+      summary: The fixed zone list
+      operationId: get_api_v1_zones
+      security: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/zones/{id}/meeting-points:
+    get:
+      tags:
+      - Zones
+      summary: Pickup spots inside a zone
+      operationId: get_api_v1_zones_id_meeting_points
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/wallet:
+    get:
+      tags:
+      - Wallet
+      summary: Balance and recent ledger
+      operationId: get_api_v1_wallet
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/wallet/topup:
+    post:
+      tags:
+      - Wallet
+      summary: Simulated top-up (disabled in production unless SIMULATED_PAYMENTS=true; supports Idempotency-Key)
+      operationId: post_api_v1_wallet_topup
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TopUpInput'
+      responses:
+        '201':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/drivers/me/profile:
+    get:
+      tags:
+      - Drivers
+      summary: My verification profile
+      operationId: get_api_v1_drivers_me_profile
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    put:
+      tags:
+      - Drivers
+      summary: Submit licence and plate for verification
+      operationId: put_api_v1_drivers_me_profile
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriverProfileInput'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/drivers/me/earnings:
+    get:
+      tags:
+      - Drivers
+      summary: Wallet-paid vs cash-to-collect, by day
+      operationId: get_api_v1_drivers_me_earnings
+      security:
+      - bearerAuth: []
+      description: 'Requires role: driver.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/users/{id}/rating:
+    get:
+      tags:
+      - Users
+      summary: A user's average rating
+      operationId: get_api_v1_users_id_rating
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/recurring-rides:
+    post:
+      tags:
+      - Recurring
+      summary: Create a repeating commute
+      operationId: post_api_v1_recurring_rides
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecurringInput'
+      responses:
+        '201':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    get:
+      tags:
+      - Recurring
+      summary: My commutes
+      operationId: get_api_v1_recurring_rides
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/recurring-rides/{id}:
+    patch:
+      tags:
+      - Recurring
+      summary: Switch a commute on or off
+      operationId: patch_api_v1_recurring_rides_id
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ActiveInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+      - Recurring
+      summary: Delete a commute
+      operationId: delete_api_v1_recurring_rides_id
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: passenger.'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/notifications:
+    get:
+      tags:
+      - Notifications
+      summary: In-app inbox with unread count
+      operationId: get_api_v1_notifications
+      security:
+      - bearerAuth: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/notifications/read:
+    post:
+      tags:
+      - Notifications
+      summary: Mark notifications read ("all" or a list of ids)
+      operationId: post_api_v1_notifications_read
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReadInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/push-tokens:
+    post:
+      tags:
+      - Notifications
+      summary: Register a device for push notifications
+      operationId: post_api_v1_push_tokens
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushTokenInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags:
+      - Notifications
+      summary: Stop pushing to a device
+      operationId: delete_api_v1_push_tokens
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushTokenRemoveInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/trips/{token}:
+    get:
+      tags:
+      - Public
+      summary: Follow a shared trip (no account; safe fields only)
+      operationId: get_api_v1_trips_token
+      parameters:
+      - name: token
+        in: path
+        required: true
+        schema:
+          type: string
+      security: []
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/admin/stats:
+    get:
+      tags:
+      - Admin
+      summary: Service health at a glance
+      operationId: get_api_v1_admin_stats
+      security:
+      - bearerAuth: []
+      description: 'Requires role: admin.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/admin/rides:
+    get:
+      tags:
+      - Admin
+      summary: Browse rides
+      operationId: get_api_v1_admin_rides
+      security:
+      - bearerAuth: []
+      description: 'Requires role: admin.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/admin/rides/{id}:
+    get:
+      tags:
+      - Admin
+      summary: 'A ride''s full story: payment, ledger, audit trail, consents'
+      operationId: get_api_v1_admin_rides_id
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: admin.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/admin/reconcile:
+    get:
+      tags:
+      - Admin
+      summary: Do the books balance?
+      operationId: get_api_v1_admin_reconcile
+      security:
+      - bearerAuth: []
+      description: 'Requires role: admin.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/admin/drivers:
+    get:
+      tags:
+      - Admin
+      summary: Driver verification queue
+      operationId: get_api_v1_admin_drivers
+      security:
+      - bearerAuth: []
+      description: 'Requires role: admin.'
+      responses:
+        '200':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/admin/drivers/{userId}/verify:
+    post:
+      tags:
+      - Admin
+      summary: Approve a driver
+      operationId: post_api_v1_admin_drivers_userId_verify
+      parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: admin.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/v1/admin/drivers/{userId}/reject:
+    post:
+      tags:
+      - Admin
+      summary: Reject a driver (a reason is required)
+      operationId: post_api_v1_admin_drivers_userId_reject
+      parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+      security:
+      - bearerAuth: []
+      description: 'Requires role: admin.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewInput'
+      responses:
+        '204':
+          description: Success
+        4XX:
+          description: Client error (400 malformed, 401 not signed in, 403 not allowed, 404, 409 conflict/retryable, 422 validation,
+            429 throttled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'

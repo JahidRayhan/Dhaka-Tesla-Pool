@@ -1,4 +1,5 @@
 const { pool } = require('../config/db');
+const driverService = require('../services/driverService');
 const { ApiError } = require('../utils/ApiError');
 const { asyncHandler } = require('../utils/asyncHandler');
 
@@ -24,6 +25,8 @@ const listMine = asyncHandler(async (req, res) => {
 const setActive = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { isActive } = req.body;
+  // With REQUIRE_VERIFIED_DRIVERS on, only an admin-verified driver may go online.
+  if (isActive) await driverService.assertMayGoOnline(req.user.id);
   const { rows } = await pool.query(
     `UPDATE teslas SET is_active = $2 WHERE id = $1 AND driver_id = $3 RETURNING *`,
     [id, !!isActive, req.user.id],

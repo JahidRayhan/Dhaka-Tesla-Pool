@@ -6,6 +6,8 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY src ./src
+COPY db ./db
+COPY scripts ./scripts
 COPY tests ./tests
 
 EXPOSE 4000

@@ -1,4 +1,5 @@
 const { pool } = require('../config/db');
+const { MAX_DETOUR_RATIO, MAX_PASSENGERS_FOR_DETOUR_SEARCH, MIN_POOL_SAVINGS_RATIO } = require('../config/matching');
 const { haversineKm } = require('../utils/haversine');
 
 /**
@@ -8,6 +9,8 @@ const { haversineKm } = require('../utils/haversine');
  * table. Not cached: the graph is tiny (a handful of zones) and changes
  * essentially never at runtime, so re-querying per call is simpler than
  * cache invalidation and not worth optimizing for this MVP's scale.
+ *
+ * @param {import('pg').PoolClient | import('pg').Pool} [client]
  */
 async function loadGraph(client = pool) {
   const { rows: zoneRows } = await client.query('SELECT id, latitude, longitude FROM zones');
@@ -32,6 +35,10 @@ async function loadGraph(client = pool) {
  * small; no priority queue needed). Returns the ordered list of zone ids
  * from origin to destination (inclusive of both) and the total distance, or
  * null if the zones aren't connected at all.
+ *
+ * @param {number} fromZoneId
+ * @param {number} toZoneId
+ * @param {import('pg').PoolClient | import('pg').Pool} [client]
  */
 async function shortestPath(fromZoneId, toZoneId, client = pool) {
   if (fromZoneId === toZoneId) return { zoneIds: [fromZoneId], distanceKm: 0 };
@@ -167,4 +174,100 @@ function routesAreCompatible(existingPaths, newPath) {
   return true;
 }
 
-module.exports = { loadGraph, shortestPath, routesAreCompatible };
+/**
+ * All-pairs shortest distances (km) over the zone graph. Floyd-Warshall is fine
+ * for a graph with a dozen nodes; recomputed per call, like loadGraph.
+ * @returns {Map<number, Map<number, number>>}
+ */
+function allPairsDistances(graph) {
+  const ids = [...graph.adjacency.keys()];
+  const d = new Map(ids.map((a) => [a, new Map(ids.map((b) => [b, a === b ? 0 : Infinity]))]));
+  for (const [from, edges] of graph.adjacency) for (const e of edges) d.get(from).set(e.to, Math.min(d.get(from).get(e.to), e.distanceKm));
+  for (const k of ids) for (const i of ids) for (const j of ids) {
+    const via = d.get(i).get(k) + d.get(k).get(j);
+    if (via < d.get(i).get(j)) d.get(i).set(j, via);
+  }
+  return d;
+}
+
+/**
+ * Can this newcomer share the vehicle with the passengers already in it?
+ *
+ * 1. Strict rule first (routesAreCompatible): everyone travels one direction
+ *    along one non-branching route, so nobody rides a metre more than alone.
+ * 2. Otherwise plan the best order of pickups and drop-offs for everyone and
+ *    measure each passenger's in-vehicle distance against their solo trip. The
+ *    pool fits if the best plan keeps EVERY passenger within `maxDetour` (a
+ *    ratio: 0.25 = 25% longer) AND the vehicle drives meaningfully less than the
+ *    separate solo trips would (MIN_POOL_SAVINGS_RATIO) — otherwise "pooling" is
+ *    just trips back to back. Among plans that qualify it picks the one with the
+ *    least total vehicle distance, never trading one passenger's unfairness for
+ *    another's saving.
+ *
+ * @param {{ adjacency: Map<number, {to:number, distanceKm:number}[]> }} graph
+ * @param {number[][]} existingPaths zone-id paths of passengers already in the pool
+ * @param {number[]} newPath the newcomer's path
+ * @param {{ maxDetour?: number, maxPassengers?: number, minSavings?: number }} [options]
+ * @returns {{ fits: boolean, strict: boolean, maxDetourPercent: number | null, order: {passenger:number, kind:'PICKUP'|'DROPOFF', zoneId:number}[] | null }}
+ */
+function evaluatePoolFit(graph, existingPaths, newPath, { maxDetour = MAX_DETOUR_RATIO, maxPassengers = MAX_PASSENGERS_FOR_DETOUR_SEARCH, minSavings = MIN_POOL_SAVINGS_RATIO } = {}) {
+  if (routesAreCompatible(existingPaths, newPath)) return { fits: true, strict: true, maxDetourPercent: 0, order: null };
+
+  const paths = [...existingPaths, newPath];
+  if (paths.length > maxPassengers) return { fits: false, strict: false, maxDetourPercent: null, order: null };
+
+  const dist = allPairsDistances(graph);
+  const trips = paths.map((p) => ({ from: p[0], to: p[p.length - 1] }));
+  const solo = trips.map((t) => dist.get(t.from).get(t.to));
+  if (solo.some((s) => !(s > 0) || !Number.isFinite(s))) return { fits: false, strict: false, maxDetourPercent: null, order: null };
+
+  const soloSum = solo.reduce((a, b) => a + b, 0);
+  const stopCount = trips.length * 2;
+  let best = null; // { total, order, worst }
+
+  // Depth-first over stop orders; a drop-off may only follow its own pickup.
+  const sequence = [];
+  const pickedUp = new Array(trips.length).fill(false);
+  const droppedOff = new Array(trips.length).fill(false);
+
+  function evaluate() {
+    const zoneAt = sequence.map((s) => (s.kind === 'PICKUP' ? trips[s.passenger].from : trips[s.passenger].to));
+    const legs = [0];
+    for (let i = 1; i < zoneAt.length; i += 1) legs.push(legs[i - 1] + dist.get(zoneAt[i - 1]).get(zoneAt[i]));
+    let worst = 0;
+    for (let p = 0; p < trips.length; p += 1) {
+      const pickupAt = sequence.findIndex((s) => s.passenger === p && s.kind === 'PICKUP');
+      const dropAt = sequence.findIndex((s) => s.passenger === p && s.kind === 'DROPOFF');
+      const ride = legs[dropAt] - legs[pickupAt];
+      worst = Math.max(worst, ride / solo[p] - 1);
+    }
+    if (worst > maxDetour + 1e-9) return;
+    const total = legs[legs.length - 1];
+    if (total > soloSum * (1 - minSavings) + 1e-9) return; // not worth pooling
+    if (!best || total < best.total - 1e-9) {
+      best = { total, worst, order: sequence.map((s, i) => ({ passenger: s.passenger, kind: s.kind, zoneId: zoneAt[i] })) };
+    }
+  }
+
+  function search() {
+    if (sequence.length === stopCount) return evaluate();
+    for (let p = 0; p < trips.length; p += 1) {
+      if (!pickedUp[p]) {
+        pickedUp[p] = true; sequence.push({ passenger: p, kind: 'PICKUP' });
+        search();
+        sequence.pop(); pickedUp[p] = false;
+      } else if (!droppedOff[p]) {
+        droppedOff[p] = true; sequence.push({ passenger: p, kind: 'DROPOFF' });
+        search();
+        sequence.pop(); droppedOff[p] = false;
+      }
+    }
+  }
+  search();
+
+  return best
+    ? { fits: true, strict: false, maxDetourPercent: Math.max(0, Math.round(best.worst * 100)), order: best.order }
+    : { fits: false, strict: false, maxDetourPercent: null, order: null };
+}
+
+module.exports = { loadGraph, shortestPath, routesAreCompatible, allPairsDistances, evaluatePoolFit };

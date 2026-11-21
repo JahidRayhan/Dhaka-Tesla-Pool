@@ -1,5 +1,5 @@
 import StatusBadge from './StatusBadge';
-import { formatTaka, POOL_DISCOUNT_DISPLAY_PERCENT } from '../lib/format';
+import { formatTaka, POOL_DISCOUNT_DISPLAY_PERCENT, timeLeftLabel } from '../lib/format';
 
 // PENDING_CONFIRMATION is cancellable too — a passenger can leave outright
 // instead of answering, distinct from declining (which returns them to
@@ -49,6 +49,17 @@ export default function RideRequestCard({
             {rideRequest.status === 'REQUESTED' && (
               <p className="text-xs text-ink/50">estimate · up to {POOL_DISCOUNT_DISPLAY_PERCENT}% off if pooled</p>
             )}
+            {rideRequest.status === 'COMPLETED' && rideRequest.paid_with === 'TESLAPAY' && (
+              <p className="text-xs text-ink/50">paid with TeslaPay</p>
+            )}
+            {rideRequest.status === 'COMPLETED' && rideRequest.paid_with === 'CASH' && (
+              <p className="text-xs text-ink/50">
+                {rideRequest.payment_method === 'TESLAPAY' ? 'wallet was short · pay driver in cash' : 'pay driver in cash'}
+              </p>
+            )}
+            {rideRequest.status !== 'COMPLETED' && rideRequest.status !== 'CANCELLED' && rideRequest.payment_method === 'TESLAPAY' && (
+              <p className="text-xs text-ink/50">pays with TeslaPay</p>
+            )}
           </div>
           {canCancel && !awaitingAgreement && (
             <button
@@ -72,6 +83,7 @@ export default function RideRequestCard({
                 )}.`
               : 'The driver wants to add you to a shared ride.'}{' '}
             Everyone has to agree — including them. Your seat is held meanwhile.
+            {timeLeftLabel(rideRequest.consentExpiresAt) && ` Answer in time: ${timeLeftLabel(rideRequest.consentExpiresAt)}.`}
           </p>
           {rideRequest.ownConsentPending ? (
             <div className="mt-2 flex flex-wrap gap-3">
@@ -104,6 +116,7 @@ export default function RideRequestCard({
           <p className="text-sm text-ink">
             <strong>{q.joinerName}</strong> is being proposed to share your ride — picked up at {q.joinerPickup}, going
             to {q.joinerDestination}. Are you OK sharing with them?
+            {timeLeftLabel(q.expiresAt) && ` (${timeLeftLabel(q.expiresAt)})`}
           </p>
           <div className="mt-2 flex gap-3">
             <button

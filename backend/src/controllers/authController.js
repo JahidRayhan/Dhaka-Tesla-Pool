@@ -1,14 +1,12 @@
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const { pool } = require('../config/db');
 const { ApiError } = require('../utils/ApiError');
 const { asyncHandler } = require('../utils/asyncHandler');
+const { normalizePhone } = require('../utils/phone');
+const sessionService = require('../services/sessionService');
+const otpService = require('../services/otpService');
 
-function issueToken(user) {
-  return jwt.sign({ sub: user.id, role: user.role }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
-  });
-}
+const sessionFor = (user, req) => sessionService.createSession(user, { userAgent: req.get('user-agent') || null });
 
 function publicUser(user) {
   const { password_hash, ...rest } = user;
@@ -45,6 +43,9 @@ const signup = asyncHandler(async (req, res) => {
   if (phone != null && typeof phone !== 'string') {
     throw new ApiError(422, 'phone must be a string');
   }
+  // Stored in one canonical form (+8801…), so "0171…" and "+88 0171…" are the same number.
+  const cleanPhone = phone ? normalizePhone(phone) : null;
+  if (phone && !cleanPhone) throw new ApiError(422, 'phone is not a valid phone number');
   const validRole = ['passenger', 'driver', 'both'].includes(role) ? role : 'passenger';
 
   const passwordHash = await bcrypt.hash(password, 10);
@@ -58,7 +59,7 @@ const signup = asyncHandler(async (req, res) => {
     const { rows } = await client.query(
       `INSERT INTO users (name, email, phone, password_hash, role)
        VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [name.trim(), cleanEmail, phone || null, passwordHash, validRole],
+      [name.trim(), cleanEmail, cleanPhone, passwordHash, validRole],
     );
     user = rows[0];
     await client.query('INSERT INTO wallets (user_id, balance_paisa) VALUES ($1, 0)', [user.id]);
@@ -70,7 +71,7 @@ const signup = asyncHandler(async (req, res) => {
     client.release();
   }
 
-  res.status(201).json({ user: publicUser(user), token: issueToken(user) });
+  res.status(201).json({ user: publicUser(user), ...(await sessionFor(user, req)) });
 });
 
 const login = asyncHandler(async (req, res) => {
@@ -92,7 +93,7 @@ const login = asyncHandler(async (req, res) => {
     throw new ApiError(401, 'Invalid email or password');
   }
 
-  res.json({ user: publicUser(user), token: issueToken(user) });
+  res.json({ user: publicUser(user), ...(await sessionFor(user, req)) });
 });
 
 const me = asyncHandler(async (req, res) => {
@@ -101,4 +102,38 @@ const me = asyncHandler(async (req, res) => {
   res.json({ user: publicUser(rows[0]) });
 });
 
-module.exports = { signup, login, me };
+const refresh = asyncHandler(async (req, res) => {
+  res.json(await sessionService.refresh(req.body?.refreshToken, { userAgent: req.get('user-agent') || null }));
+});
+
+const logout = asyncHandler(async (req, res) => {
+  await sessionService.logout(req.body?.refreshToken);
+  res.status(204).send();
+});
+
+const logoutAll = asyncHandler(async (req, res) => {
+  await sessionService.logoutAll(req.user.id);
+  res.status(204).send();
+});
+
+const requestPhoneOtp = asyncHandler(async (req, res) => {
+  await otpService.requestPhoneVerification(req.user.id, req.body?.phone);
+  res.status(204).send();
+});
+
+const verifyPhoneOtp = asyncHandler(async (req, res) => {
+  await otpService.verifyPhone(req.user.id, req.body?.code);
+  res.status(204).send();
+});
+
+const forgotPassword = asyncHandler(async (req, res) => {
+  await otpService.requestPasswordReset(req.body?.phone);
+  res.status(204).send(); // identical whether or not the number is registered
+});
+
+const resetPassword = asyncHandler(async (req, res) => {
+  await otpService.resetPassword({ phone: req.body?.phone, code: req.body?.code, newPassword: req.body?.newPassword });
+  res.status(204).send();
+});
+
+module.exports = { signup, login, me, refresh, logout, logoutAll, requestPhoneOtp, verifyPhoneOtp, forgotPassword, resetPassword };

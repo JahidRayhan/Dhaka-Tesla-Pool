@@ -1,37 +1,62 @@
 'use client';
 
 import { createContext, useContext, useEffect, useState } from 'react';
-import { api } from './api';
+import { api, setSession, clearSession } from './api';
 
 const AuthContext = createContext(null);
 const STORAGE_KEY = 'dtp_token';
+const REFRESH_KEY = 'dtp_refresh';
 
 export function AuthProvider({ children }) {
   const [token, setToken] = useState(null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  function persist({ accessToken, refreshToken }) {
+    window.localStorage.setItem(STORAGE_KEY, accessToken);
+    window.localStorage.setItem(REFRESH_KEY, refreshToken);
+  }
+
+  function forget() {
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.localStorage.removeItem(REFRESH_KEY);
+    clearSession();
+    setToken(null);
+    setUser(null);
+  }
+
+  // The API helper refreshes tokens silently; keep storage and React state in step
+  // with it, and sign out only if the refresh token itself is no longer valid.
   useEffect(() => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    if (!stored) {
+    setSession({
+      onChange: (tokens) => {
+        persist(tokens);
+        setToken(tokens.accessToken);
+      },
+      onExpired: forget,
+    });
+    const storedAccess = window.localStorage.getItem(STORAGE_KEY);
+    const storedRefresh = window.localStorage.getItem(REFRESH_KEY);
+    if (!storedAccess && !storedRefresh) {
       setLoading(false);
       return;
     }
+    setSession({ accessToken: storedAccess, refreshToken: storedRefresh });
     api
-      .me(stored)
+      .me(storedAccess || '')
       .then((data) => {
-        setToken(stored);
+        setToken(window.localStorage.getItem(STORAGE_KEY));
         setUser(data.user);
       })
-      .catch(() => {
-        window.localStorage.removeItem(STORAGE_KEY);
-      })
+      .catch(() => forget())
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function applySession(data) {
-    window.localStorage.setItem(STORAGE_KEY, data.token);
-    setToken(data.token);
+    persist({ accessToken: data.accessToken || data.token, refreshToken: data.refreshToken });
+    setSession({ accessToken: data.accessToken || data.token, refreshToken: data.refreshToken });
+    setToken(data.accessToken || data.token);
     setUser(data.user);
   }
 
@@ -48,9 +73,9 @@ export function AuthProvider({ children }) {
   }
 
   function logout() {
-    window.localStorage.removeItem(STORAGE_KEY);
-    setToken(null);
-    setUser(null);
+    const refreshToken = window.localStorage.getItem(REFRESH_KEY);
+    if (refreshToken) api.logout(refreshToken).catch(() => {}); // revoke it server-side, best effort
+    forget();
   }
 
   return (

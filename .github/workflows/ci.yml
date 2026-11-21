@@ -1,0 +1,126 @@
+name: CI
+
+# Every push and pull request runs the same checks a human would run by hand.
+# Protect `master`, `pre-release` and `release/*` in the repo settings and mark
+# these jobs as required, so nothing merges while one is red.
+on:
+  push:
+    branches: [master, pre-release, 'release/**', 'feature/**', 'build/**', 'docs/**', 'fix/**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  backend:
+    name: Backend (types, migrations, tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tesla
+          POSTGRES_PASSWORD: tesla
+          POSTGRES_DB: dhaka_tesla_pool
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U tesla" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://tesla:tesla@localhost:5432/dhaka_tesla_pool
+      JWT_SECRET: ci_only_secret_not_used_anywhere_else
+      PUSH_PROVIDER: memory
+      SMS_PROVIDER: memory
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: backend/package-lock.json }
+      - run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Apply migrations from scratch and load demo data
+        run: |
+          node scripts/migrate.js
+          node scripts/seed.js all
+      - name: Unit + integration tests (real Postgres)
+        run: npm test
+
+  acceptance:
+    name: Acceptance tests (by brief requirement)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: tesla, POSTGRES_PASSWORD: tesla, POSTGRES_DB: dhaka_tesla_pool_acceptance }
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U tesla" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://tesla:tesla@localhost:5432/dhaka_tesla_pool_acceptance
+      JWT_SECRET: acceptance_ci_secret
+      JWT_EXPIRES_IN: 1h
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}' }
+      - run: npm ci
+        working-directory: backend
+      - run: node scripts/migrate.js && node scripts/seed.js all
+        working-directory: backend
+      - run: npm ci
+        working-directory: acceptance-tests
+      - run: node --test --test-concurrency=1 *.test.js
+        working-directory: acceptance-tests
+        env:
+          ENV_FILE: /dev/null   # use the environment above instead of a .env.test file
+
+  web:
+    name: Web (server build + static export)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NEXT_PUBLIC_API_URL: https://example.invalid
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+      - name: Server build (what Docker runs)
+        run: npm run build
+      - name: Static export (what Netlify serves)
+        run: STATIC_EXPORT=true npm run build
+
+  mobile:
+    name: Mobile (tests + Android/iOS bundles)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      EXPO_NO_TELEMETRY: '1'
+      CI: '1'
+      EXPO_PUBLIC_API_URL: https://example.invalid
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: mobile/package-lock.json }
+      - run: npm ci
+      - run: npm test
+      - name: Bundle for Android and iOS
+        run: npx expo export --platform android --platform ios
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build ./backend
+      - run: docker build ./frontend
