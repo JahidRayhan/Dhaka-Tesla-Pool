@@ -40,3 +40,9 @@ export function timeLeftLabel(expiresAt, now = Date.now()) {
   const minutes = Math.ceil(ms / 60000);
   return `${minutes} min left`;
 }
+
+// Where a signed-in person lands: operators on the console, drivers on the board, everyone else on rides.
+export function homeFor(user) {
+  if (user.role === 'admin') return '/admin';
+  return user.role === 'driver' ? '/driver' : '/passenger';
+}

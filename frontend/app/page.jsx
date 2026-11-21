@@ -1,4 +1,5 @@
 'use client';
+import { homeFor } from '../lib/format';
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -11,7 +12,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (loading || !user) return;
-    router.replace(user.role === 'driver' ? '/driver' : '/passenger');
+    router.replace(homeFor(user));
   }, [user, loading, router]);
 
   if (loading) return null;
