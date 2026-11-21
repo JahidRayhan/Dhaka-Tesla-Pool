@@ -1,14 +1,20 @@
 const { ApiError } = require('../utils/ApiError');
 const rideRequestService = require('../services/rideRequestService');
+const fitService = require('../services/fitService');
 const { asyncHandler } = require('../utils/asyncHandler');
 
 const create = asyncHandler(async (req, res) => {
-  const { pickupZoneId, destinationZoneId, seatsRequested, paymentMethod } = req.body;
+  const { pickupZoneId, destinationZoneId, seatsRequested, paymentMethod, shareMax, womenOnly, pickupPointId, scheduledFor, maxWaitMinutes } = req.body;
   const rideRequest = await rideRequestService.createRequest(req.user.id, {
     pickupZoneId,
     destinationZoneId,
     seatsRequested,
     paymentMethod,
+    ...(shareMax !== undefined && { shareMax }),
+    ...(womenOnly !== undefined && { womenOnly }),
+    ...(pickupPointId !== undefined && { pickupPointId }),
+    ...(scheduledFor !== undefined && { scheduledFor }),
+    ...(maxWaitMinutes !== undefined && { maxWaitMinutes }),
   });
   res.status(201).json({ rideRequest });
 });
@@ -30,10 +36,17 @@ function parsePageParam(raw, { name, min, max, fallback }) {
   return n;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const listOpen = asyncHandler(async (req, res) => {
   const limit = parsePageParam(req.query.limit, { name: 'limit', min: 1, max: 100, fallback: 50 });
   const offset = parsePageParam(req.query.offset, { name: 'offset', min: 0, max: 1_000_000, fallback: 0 });
-  const rideRequests = await rideRequestService.listOpen({ limit, offset });
+  let rideRequests = await rideRequestService.listOpen({ limit, offset });
+  // ?poolId=<your live pool> marks which requests could join it, and why not, best first.
+  if (req.query.poolId !== undefined) {
+    if (typeof req.query.poolId !== 'string' || !UUID.test(req.query.poolId)) throw new ApiError(422, 'poolId must be a pool id');
+    rideRequests = await fitService.annotateFit(req.user.id, req.query.poolId, rideRequests);
+  }
   res.json({ rideRequests, limit, offset });
 });
 

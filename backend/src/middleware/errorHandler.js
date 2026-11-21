@@ -1,4 +1,5 @@
 const { ApiError } = require('../utils/ApiError');
+const logger = require('../utils/logger');
 
 // Postgres error codes we want to translate into clean 4xx responses
 // instead of leaking a raw 500 + SQL detail to the client.
@@ -46,8 +47,9 @@ function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-va
     return res.status(409).json({ error: PG_ERROR_MESSAGES[err.code] });
   }
 
-  console.error(err);
-  return res.status(500).json({ error: 'Internal server error' });
+  // The caller gets a request id they can quote; the full error stays in our logs.
+  logger.error('unhandled error', { requestId: req.id, method: req.method, path: req.originalUrl, err });
+  return res.status(500).json({ error: 'Internal server error', requestId: req.id });
 }
 
 module.exports = { errorHandler };

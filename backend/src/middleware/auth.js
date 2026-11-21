@@ -10,7 +10,7 @@ function requireAuth(req, res, next) {
   }
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const payload = /** @type {import('jsonwebtoken').JwtPayload} */ (jwt.verify(token, process.env.JWT_SECRET));
     req.user = { id: payload.sub, role: payload.role };
     next();
   } catch (err) {
@@ -31,4 +31,14 @@ function requireRole(role) {
   };
 }
 
-module.exports = { requireAuth, requireRole };
+/**
+ * Operators only. Deliberately NOT built on requireRole: that treats role 'both'
+ * as a wildcard (a passenger who also drives), and a wildcard must never reach
+ * the admin console. Only an exact 'admin' passes.
+ */
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') return next(new ApiError(403, 'This action requires an administrator'));
+  return next();
+}
+
+module.exports = { requireAuth, requireRole, requireAdmin };

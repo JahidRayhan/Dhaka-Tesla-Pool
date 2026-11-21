@@ -1,10 +1,16 @@
 const { pool: db } = require('../config/db');
+const { retrying } = require('../utils/retryTx');
 const { ApiError } = require('../utils/ApiError');
 const { computePoolDiscount } = require('./fareService');
 const { logTransition } = require('./statusHistoryService');
-const { routesAreCompatible } = require('./routeService');
+const { loadGraph, evaluatePoolFit } = require('./routeService');
 const consentService = require('./consentService');
 const { settleRidePayment } = require('./walletService');
+const { commit } = require('../utils/tx');
+const { notifyAfterCommit } = require('./notificationService');
+const { haversineKm } = require('../utils/haversine');
+const { ARRIVAL_GEOFENCE_KM, LOCATION_STALE_MINUTES } = require('../config/tracking');
+const { CONSENT_TIMEOUT_MINUTES } = require('../config/timeouts');
 
 async function assertOwnsActiveTesla(client, driverId, teslaId) {
   // FOR UPDATE serialises everything a driver does with one Tesla. Without it,
@@ -54,6 +60,7 @@ async function acceptRequest(driverId, requestId, { teslaId, poolId }) {
     let resolvedPoolId = poolId;
     const joiningExistingPool = Boolean(poolId);
     let existingMemberIds = [];
+    let joinMembers = [];
 
     if (poolId) {
       // --- Join an existing pool ---
@@ -92,18 +99,33 @@ async function acceptRequest(driverId, requestId, { teslaId, poolId }) {
       // couldn't tell "same general area" from "needs to backtrack through a
       // junction."
       const { rows: memberRows } = await client.query(
-        `SELECT id, route_zone_ids FROM ride_requests
-         WHERE pool_id = $1 AND status NOT IN ('CANCELLED')`,
+        `SELECT rr.id, rr.passenger_id, rr.route_zone_ids, rr.share_max, rr.women_only, u.gender
+         FROM ride_requests rr JOIN users u ON u.id = rr.passenger_id
+         WHERE rr.pool_id = $1 AND rr.status NOT IN ('CANCELLED')`,
         [poolId],
       );
       const existingPaths = memberRows.map((r) => r.route_zone_ids);
-      if (!routesAreCompatible(existingPaths, rideRequest.route_zone_ids)) {
+      // Strict no-backtracking first; otherwise a bounded detour is allowed if it
+      // is fair to everyone and the pool really saves driving (config/matching.js).
+      const fit = evaluatePoolFit(await loadGraph(client), existingPaths, rideRequest.route_zone_ids);
+      if (!fit.fits) {
         throw new ApiError(
           422,
           "This request's route can't be combined with the pool's without backtracking through a junction",
         );
       }
       existingMemberIds = memberRows.map((r) => r.id);
+      joinMembers = memberRows;
+
+      // Women-only works both ways: a passenger who asked for it is only ever
+      // pooled with women, and a women-only pool does not take anyone else.
+      const { rows: [joinerUser] } = await client.query('SELECT gender FROM users WHERE id = $1', [rideRequest.passenger_id]);
+      if (rideRequest.women_only && memberRows.some((m) => m.gender !== 'female')) {
+        throw new ApiError(422, 'This passenger asked for a women-only ride, and this pool includes other passengers');
+      }
+      if (memberRows.some((m) => m.women_only) && joinerUser.gender !== 'female') {
+        throw new ApiError(422, 'This pool is women-only');
+      }
 
       // Atomic capacity guard — the whole point of this statement is that
       // the check and the increment happen as one indivisible DB operation.
@@ -178,9 +200,6 @@ async function acceptRequest(driverId, requestId, { teslaId, poolId }) {
         [requestId, resolvedPoolId],
       );
     }
-    if (joiningExistingPool) {
-      await consentService.createProposal(client, requestId, existingMemberIds);
-    }
     await logTransition(client, {
       entityType: 'ride_request',
       entityId: requestId,
@@ -189,8 +208,36 @@ async function acceptRequest(driverId, requestId, { teslaId, poolId }) {
       changedBy: driverId,
     });
 
-    await client.query('COMMIT');
-    return { poolId: resolvedPoolId, rideRequestStatus: initialStatus };
+    const { rows: [driverRow] } = await client.query('SELECT name FROM users WHERE id = $1', [driverId]);
+    let finalStatus = initialStatus;
+    if (!joiningExistingPool) {
+      notifyAfterCommit(client, [rideRequest.passenger_id], 'POOL_MATCHED', { poolId: resolvedPoolId, driverName: driverRow.name, teslaName: tesla.name });
+    } else {
+      // Anyone who pre-approved sharing "with up to N" is not asked again, as
+      // long as this pool stays within their N.
+      const newSize = joinMembers.length + 1;
+      const approves = (r) => r.share_max != null && newSize <= r.share_max;
+      const preApproved = joinMembers.filter(approves).map((r) => r.id);
+      if (approves(rideRequest)) preApproved.push(requestId);
+      const proposalId = await consentService.createProposal(client, requestId, existingMemberIds, preApproved);
+
+      if (preApproved.length === existingMemberIds.length + 1) {
+        // Everyone had already said yes: no question to ask, the newcomer is matched now.
+        await consentService.resolveProposal(client, proposalId, driverId, 'every passenger had pre-approved sharing for a pool this size');
+        finalStatus = 'MATCHED';
+        notifyAfterCommit(client, [rideRequest.passenger_id], 'POOL_MATCHED', { poolId: resolvedPoolId, driverName: driverRow.name, teslaName: tesla.name });
+      } else {
+        const { rows: [joinerRow] } = await client.query('SELECT name FROM users WHERE id = $1', [rideRequest.passenger_id]);
+        const asked = joinMembers.filter((m) => !preApproved.includes(m.id)).map((m) => m.passenger_id);
+        notifyAfterCommit(client, asked, 'SHARE_REQUEST', { rideRequestId: requestId, joinerName: joinerRow.name, minutes: CONSENT_TIMEOUT_MINUTES });
+        if (!preApproved.includes(requestId)) {
+          notifyAfterCommit(client, [rideRequest.passenger_id], 'SHARE_CONFIRM', { rideRequestId: requestId, minutes: CONSENT_TIMEOUT_MINUTES });
+        }
+      }
+    }
+
+    await commit(client);
+    return { poolId: resolvedPoolId, rideRequestStatus: finalStatus };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -276,6 +323,21 @@ async function transitionPool(driverId, poolId, { fromStatus, toStatus, rrFromSt
       if (pending.length > 0) {
         throw new ApiError(409, 'Some passengers in this pool have not yet confirmed sharing the ride');
       }
+
+      // If the driver's app has shared a recent position, they must actually be
+      // near a pickup. No recent position = not enforced (GPS fails; the demo has none).
+      const recent = targetPool.last_location_at && Date.now() - new Date(targetPool.last_location_at).getTime() < LOCATION_STALE_MINUTES * 60000;
+      if (recent) {
+        const { rows: pickups } = await client.query(
+          `SELECT DISTINCT z.latitude, z.longitude FROM ride_requests rr JOIN zones z ON z.id = rr.pickup_zone_id
+           WHERE rr.pool_id = $1 AND rr.status = 'MATCHED'`,
+          [poolId],
+        );
+        const nearest = Math.min(...pickups.map((z) => haversineKm(targetPool.last_latitude, targetPool.last_longitude, z.latitude, z.longitude)));
+        if (pickups.length > 0 && nearest > ARRIVAL_GEOFENCE_KM) {
+          throw new ApiError(409, `You don't seem to be near the pickup yet (about ${nearest.toFixed(1)} km away)`);
+        }
+      }
     }
 
     await client.query(
@@ -293,7 +355,7 @@ async function transitionPool(driverId, poolId, { fromStatus, toStatus, rrFromSt
     const { rows: affected } = await client.query(
       `UPDATE ride_requests SET status = $2, ${timestampCol} = now()
        WHERE pool_id = $1 AND status = $3
-       RETURNING id, distance_charge_paisa`,
+       RETURNING id, passenger_id, distance_charge_paisa`,
       [poolId, rrToStatus, rrFromStatus],
     );
 
@@ -356,7 +418,18 @@ async function transitionPool(driverId, poolId, { fromStatus, toStatus, rrFromSt
       });
     }
 
-    await client.query('COMMIT');
+    // Tell every passenger (after the commit, never for a rolled-back change).
+    const { rows: [driverRow] } = await client.query('SELECT name FROM users WHERE id = $1', [driverId]);
+    if (toStatus === 'DRIVER_ARRIVED') {
+      notifyAfterCommit(client, affected.map((r) => r.passenger_id), 'DRIVER_ARRIVED', { poolId, driverName: driverRow.name });
+    } else if (toStatus === 'STARTED') {
+      notifyAfterCommit(client, affected.map((r) => r.passenger_id), 'TRIP_STARTED', { poolId });
+    } else if (toStatus === 'COMPLETED') {
+      const { rows: fares } = await client.query('SELECT id, passenger_id, final_fare_paisa FROM ride_requests WHERE id = ANY($1::uuid[])', [affected.map((r) => r.id)]);
+      for (const f of fares) notifyAfterCommit(client, [f.passenger_id], 'TRIP_COMPLETED', { poolId, rideRequestId: f.id, farePaisa: Number(f.final_fare_paisa) });
+    }
+
+    await commit(client);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -466,7 +539,7 @@ async function cancelPool(driverId, poolId, reason) {
       });
     }
 
-    await client.query('COMMIT');
+    await commit(client);
     return { releasedRequests: memberIds.length };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -503,7 +576,8 @@ const completeTrip = (driverId, poolId) =>
     timestampCol: 'completed_at',
   });
 
-module.exports = {
+module.exports = retrying(
+  {
   acceptRequest,
   confirmJoin,
   declineJoin,
@@ -513,4 +587,6 @@ module.exports = {
   startTrip,
   completeTrip,
   cancelPool,
-};
+  },
+  ['acceptRequest', 'confirmJoin', 'declineJoin', 'markArrived', 'startTrip', 'completeTrip', 'cancelPool'],
+);

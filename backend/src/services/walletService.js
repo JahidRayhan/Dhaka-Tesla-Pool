@@ -1,5 +1,6 @@
 const { pool } = require('../config/db');
 const { ApiError } = require('../utils/ApiError');
+const { simulatedPaymentsEnabled } = require('../config/features');
 
 // Simulated top-up limits, in paisa: ৳1 minimum, ৳10,000 per top-up.
 const MIN_TOPUP_PAISA = 100;
@@ -25,6 +26,11 @@ async function getWallet(userId) {
 }
 
 async function topUp(userId, amountPaisa) {
+  // Adding money is a simulation (free money). Production has no payment
+  // gateway yet, so it refuses unless explicitly switched on for a demo.
+  if (!simulatedPaymentsEnabled()) {
+    throw new ApiError(403, 'Adding money is not available yet — online payments are coming soon');
+  }
   if (!Number.isInteger(amountPaisa) || amountPaisa < MIN_TOPUP_PAISA || amountPaisa > MAX_TOPUP_PAISA) {
     throw new ApiError(422, `amountPaisa must be a whole number between ${MIN_TOPUP_PAISA} and ${MAX_TOPUP_PAISA}`);
   }
@@ -95,4 +101,40 @@ async function balanceFor(client, userId) {
   return rows.length ? Number(rows[0].balance_paisa) : 0;
 }
 
-module.exports = { getWallet, topUp, settleRidePayment, balanceFor, MIN_TOPUP_PAISA, MAX_TOPUP_PAISA };
+/**
+ * Accounting self-check. Returns every place the books disagree:
+ *  - wallets whose balance != opening baseline + sum of their ledger rows
+ *  - TeslaPay payments marked PAID whose ledger rows don't add up to the fare
+ * An empty result is the healthy state. Run nightly (jobs.js) and on demand
+ * (scripts/reconcile.js, GET /admin/reconcile).
+ */
+async function reconcile() {
+  const { rows: wallets } = await pool.query(
+    `SELECT w.user_id, w.balance_paisa, w.ledger_baseline_paisa,
+            COALESCE(SUM(t.amount_paisa), 0) AS ledger_sum
+     FROM wallets w LEFT JOIN wallet_transactions t ON t.user_id = w.user_id
+     GROUP BY w.user_id, w.balance_paisa, w.ledger_baseline_paisa
+     HAVING w.balance_paisa <> w.ledger_baseline_paisa + COALESCE(SUM(t.amount_paisa), 0)`,
+  );
+  const { rows: payments } = await pool.query(
+    `SELECT p.ride_request_id, p.amount_paisa,
+            COALESCE(SUM(t.amount_paisa) FILTER (WHERE t.kind = 'RIDE_PAYMENT'), 0) AS paid_out,
+            COALESCE(SUM(t.amount_paisa) FILTER (WHERE t.kind = 'RIDE_EARNING'), 0) AS earned
+     FROM payments p LEFT JOIN wallet_transactions t ON t.ride_request_id = p.ride_request_id
+     WHERE p.method = 'TESLAPAY' AND p.status = 'PAID'
+     GROUP BY p.ride_request_id, p.amount_paisa
+     HAVING COALESCE(SUM(t.amount_paisa) FILTER (WHERE t.kind = 'RIDE_PAYMENT'), 0) <> -p.amount_paisa
+         OR COALESCE(SUM(t.amount_paisa) FILTER (WHERE t.kind = 'RIDE_EARNING'), 0) <> p.amount_paisa`,
+  );
+  return {
+    ok: wallets.length === 0 && payments.length === 0,
+    walletMismatches: wallets.map((w) => ({
+      userId: w.user_id,
+      balancePaisa: Number(w.balance_paisa),
+      expectedPaisa: Number(w.ledger_baseline_paisa) + Number(w.ledger_sum),
+    })),
+    paymentMismatches: payments.map((p) => ({ rideRequestId: p.ride_request_id, amountPaisa: Number(p.amount_paisa), paidOut: Number(p.paid_out), earned: Number(p.earned) })),
+  };
+}
+
+module.exports = { getWallet, topUp, reconcile, settleRidePayment, balanceFor, MIN_TOPUP_PAISA, MAX_TOPUP_PAISA };
