@@ -7,7 +7,7 @@
     "test": "node --test *.test.js"
   },
   "devDependencies": {
-    "supertest": "^7.0.0",
+    "supertest": "^7.3.2",
     "dotenv": "^16.4.5"
   }
 }
