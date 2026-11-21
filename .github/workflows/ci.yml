@@ -38,7 +38,7 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: backend/package-lock.json }
       - run: npm ci
@@ -66,7 +66,7 @@ jobs:
       JWT_SECRET: acceptance_ci_secret
       JWT_EXPIRES_IN: 1h
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}' }
       - run: npm ci
@@ -89,7 +89,7 @@ jobs:
     env:
       NEXT_PUBLIC_API_URL: https://example.invalid
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: frontend/package-lock.json }
       - run: npm ci
@@ -109,7 +109,7 @@ jobs:
       CI: '1'
       EXPO_PUBLIC_API_URL: https://example.invalid
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with: { node-version: '${{ env.NODE_VERSION }}', cache: npm, cache-dependency-path: mobile/package-lock.json }
       - run: npm ci
@@ -121,6 +121,6 @@ jobs:
     name: Docker images build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build ./backend
       - run: docker build ./frontend
